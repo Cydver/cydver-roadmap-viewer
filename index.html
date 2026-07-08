@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Gundam UCE Roadmap</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <section class="title-block">
+        <p class="eyebrow">PVP Meta Roadmap</p>
+        <h1>Gundam UCE Pull Roadmap</h1>
+        <p id="summary" class="summary">Loading roadmap…</p>
+      </section>
+      <section class="viewer-controls" aria-label="Viewer controls">
+        <button id="btnZoomOut" type="button">−</button>
+        <button id="btnFit" type="button">Fit</button>
+        <button id="btnZoomIn" type="button">+</button>
+        <span id="zoomLabel" class="zoom-label">100%</span>
+      </section>
+    </header>
+
+    <section class="legend-panel" aria-label="Meta status legend">
+      <div id="statusLegend" class="legend"></div>
+    </section>
+
+    <section id="message" class="message hidden"></section>
+
+    <section id="chartScroll" class="chart-scroll" aria-label="Roadmap chart">
+      <div id="chartStage" class="chart-stage">
+        <div id="roadmap" class="roadmap"></div>
+      </div>
+    </section>
+  </main>
+
+  <aside id="unitDrawer" class="unit-drawer hidden" aria-live="polite">
+    <button id="btnCloseDrawer" class="drawer-close" type="button" aria-label="Close">×</button>
+    <div id="drawerContent"></div>
+  </aside>
+
+  <div id="tooltip" class="tooltip hidden" role="tooltip"></div>
+
+  <script src="viewer.js"></script>
+</body>
+</html>
