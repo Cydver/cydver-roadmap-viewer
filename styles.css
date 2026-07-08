@@ -16,6 +16,11 @@
   --header-h: 106px;
   --icon: 176px;
   --bar-h: 18px;
+  --weeks: 12;
+  --textBoost: 1;
+  --barTextBoost: 1;
+  --gridLine: 1px;
+  --monthGridLine: 2px;
   --shadow: 0 24px 70px rgba(0,0,0,.42);
   --radius: 20px;
 }
@@ -200,7 +205,7 @@ h1 {
   color: #eff5ff;
   text-transform: uppercase;
   letter-spacing: .12em;
-  font-size: 14px;
+  font-size: calc(14px * var(--textBoost));
   font-weight: 950;
   background: rgba(255,255,255,.025);
 }
@@ -219,7 +224,7 @@ h1 {
   justify-content: center;
   border-bottom: 1px solid var(--line);
   color: #cbd7e8;
-  font-size: 12px;
+  font-size: calc(12px * var(--textBoost));
   letter-spacing: .14em;
   font-weight: 950;
 }
@@ -235,7 +240,7 @@ h1 {
   background: linear-gradient(90deg, rgba(255,255,255,.04), rgba(255,255,255,.012));
   text-transform: uppercase;
   letter-spacing: .12em;
-  font-size: 15px;
+  font-size: calc(15px * var(--textBoost));
   font-weight: 950;
   text-shadow: 0 0 18px color-mix(in srgb, currentColor 28%, transparent);
 }
@@ -243,24 +248,24 @@ h1 {
 .grid-line.v {
   top: var(--header-h);
   bottom: 0;
-  width: 1px;
+  width: var(--gridLine);
   background: var(--line);
 }
 .grid-line.v.month {
   top: 0;
-  width: 2px;
+  width: var(--monthGridLine);
   background: var(--line-strong);
 }
 .grid-line.h {
   left: 0;
   right: 0;
-  height: 1px;
+  height: var(--gridLine);
   background: var(--line);
 }
 
 .lane-track {
   left: calc(var(--left) + 10px);
-  right: 10px;
+  width: calc(var(--weeks) * var(--cell) - 20px);
   height: var(--bar-h);
   border-radius: 999px;
   background: rgba(255,255,255,.035);
@@ -276,6 +281,7 @@ h1 {
   border: 1px solid rgba(255,255,255,.2);
   box-shadow: 0 14px 30px rgba(0,0,0,.35);
   cursor: pointer;
+  z-index: 20;
   transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease;
 }
 .unit-card:hover,
@@ -285,6 +291,35 @@ h1 {
   box-shadow: 0 20px 46px rgba(0,0,0,.45), 0 0 0 2px rgba(71,169,255,.26);
   z-index: 30;
 }
+.unit-card.must-p5 {
+  border-color: rgba(255,59,77,.92);
+  box-shadow: 0 0 0 3px rgba(255,59,77,.72), 0 14px 30px rgba(0,0,0,.35);
+}
+.unit-card.must-p5:hover,
+.unit-card.must-p5.active {
+  box-shadow: 0 0 0 3px rgba(255,59,77,.82), 0 20px 46px rgba(0,0,0,.45);
+}
+.unit-card.between-row { border-style: double; }
+.unit-card.compact-pilot {
+  border-radius: 10px;
+  box-shadow: 0 8px 18px rgba(0,0,0,.42);
+}
+.unit-card.compact-pilot .nameplate {
+  min-height: 30px;
+  padding: 14px 6px 5px;
+  font-size: calc(9.5px * var(--textBoost));
+  line-height: 1.05;
+}
+.unit-card.compact-pilot .tags {
+  right: 5px;
+  top: 5px;
+  transform: scale(.82);
+  transform-origin: top right;
+}
+.unit-card.compact-pilot .tag {
+  padding: calc(3px * var(--textBoost)) calc(5px * var(--textBoost));
+}
+
 .unit-card img,
 .placeholder {
   width: 100%;
@@ -314,7 +349,7 @@ h1 {
   padding: 26px 8px 7px;
   background: linear-gradient(180deg, transparent, rgba(0,0,0,.8) 42%, rgba(0,0,0,.94));
   color: #fff;
-  font-size: 11px;
+  font-size: calc(11px * var(--textBoost));
   line-height: 1.12;
   font-weight: 900;
   text-shadow: 0 1px 2px #000;
@@ -327,7 +362,21 @@ h1 {
   flex-direction: column;
   align-items: flex-end;
   gap: 4px;
+  max-width: 92px;
   pointer-events: none;
+}
+.tags.two-col {
+  flex-direction: row-reverse;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 4px;
+  max-width: 178px;
+}
+.tags.two-col .tag-column {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
 }
 .tag {
   display: inline-flex;
@@ -338,7 +387,7 @@ h1 {
   border-radius: 999px;
   border: 1px solid rgba(255,255,255,.48);
   color: #fff;
-  font-size: 9px;
+  font-size: calc(9px * var(--textBoost));
   line-height: 1;
   font-weight: 950;
   text-shadow: 0 1px 2px rgba(0,0,0,.52);
@@ -349,6 +398,9 @@ h1 {
 .tag.core { background: #67ef87; color: #07100a; text-shadow: none; }
 .tag.tech { background: #ffcc4d; color: #130e00; text-shadow: none; }
 .tag.def { background: #c18cff; }
+.tag.sub { background: #4fd6be; color: #06120f; text-shadow: none; }
+.tag.cb { background: #ff8c48; color: #170a00; text-shadow: none; }
+.tag.must-p5 { background: #ff2b42; border-color: rgba(255,255,255,.72); box-shadow: 0 0 0 2px rgba(255,43,66,.38), 0 6px 14px rgba(0,0,0,.32); text-transform: uppercase; }
 .tag.custom { background: #657386; }
 
 .meta-bar {
@@ -357,9 +409,9 @@ h1 {
   background: var(--bar);
   border: 1px solid rgba(255,255,255,.3);
   box-shadow: 0 8px 20px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.18);
-  overflow: hidden;
+  overflow: visible;
   cursor: pointer;
-  z-index: 18;
+  z-index: 8;
   transition: transform .13s ease, filter .13s ease, box-shadow .13s ease;
 }
 .meta-bar:hover,
@@ -367,7 +419,7 @@ h1 {
   transform: translateY(-1px);
   filter: saturate(1.12) brightness(1.08);
   box-shadow: 0 12px 26px rgba(0,0,0,.34), 0 0 0 2px rgba(255,255,255,.18), inset 0 1px 0 rgba(255,255,255,.22);
-  z-index: 26;
+  z-index: 9;
 }
 .bar-label {
   position: absolute;
@@ -375,13 +427,19 @@ h1 {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: rgba(255,255,255,.95);
-  font-size: 10px;
-  font-weight: 950;
+  color: rgba(255,255,255,.98);
+  font-size: calc(12px * var(--barTextBoost));
+  font-weight: 1000;
+  line-height: 1;
+  letter-spacing: .01em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  text-shadow: 0 1px 3px rgba(0,0,0,.7);
+  transform: scaleY(.88);
+  transform-origin: center;
+  -webkit-text-stroke: calc(.35px * var(--barTextBoost)) rgba(0,0,0,.75);
+  paint-order: stroke fill;
+  text-shadow: 0 1px 1px rgba(0,0,0,.92), 0 0 4px rgba(0,0,0,.82), 0 0 8px rgba(0,0,0,.55);
 }
 
 .tooltip {
@@ -398,6 +456,21 @@ h1 {
   color: #eef5ff;
   font-size: 12px;
 }
+.tooltip-subline {
+  color: #cfdae9;
+  margin-bottom: 6px;
+}
+.tooltip-must-p5 {
+  display: inline-block;
+  margin: 2px 0 6px;
+  color: #ff5868;
+  font-weight: 950;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  text-shadow: 0 0 12px rgba(255,43,66,.35);
+}
+.tooltip-tags { margin-top: 6px; }
+
 .tooltip h3 {
   margin: 0 0 7px;
   font-size: 15px;
