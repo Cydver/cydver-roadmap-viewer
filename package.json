@@ -1,0 +1,12 @@
+{
+  "name": "gundam-uce-roadmap-viewer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "update-catalog": "node tools/update-altema-catalog.mjs"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0"
+  }
+}
