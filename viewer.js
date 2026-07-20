@@ -121,7 +121,7 @@ function bindControls() {
   document.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
     if (!event.target.closest?.(".legend-item")) hideAppTooltip(true);
-    if (event.target.closest?.(".unit-card, .meta-bar, .unit-drawer, .viewer-controls, .topbar, .legend-panel, button, a, input, select, textarea")) return;
+    if (event.target.closest?.(".unit-card, .meta-bar, .unit-drawer, .unit-tooltip-card, .viewer-controls, .topbar, .legend-panel, button, a, input, select, textarea")) return;
     hideTooltip(true);
   });
   els.roadmap.addEventListener("pointerdown", beginPan);
@@ -695,6 +695,7 @@ function showTooltip(event, unit, activeSegment = null, options = {}) {
   const metaUnit = metaOwnerForUnit(unit);
   const activeId = metaUnit ? (activeSegment?.id || metaUnit.segments?.[0]?.id || null) : null;
   tooltipEl.innerHTML = tooltipHtml(unit, activeId);
+  tooltipEl.classList.add("unit-tooltip-card");
   tooltipEl.classList.remove("hidden");
   tooltipPinned = shouldPin;
   tooltipEl.classList.toggle("pinned", tooltipPinned);
@@ -736,33 +737,55 @@ function tooltipHtml(unit, activeSegmentId = null) {
   const pairedMs = isPilot(unit) ? pairedMsForPilot(unit) : null;
   const metaUnit = metaOwnerForUnit(unit);
   const title = pairedMs ? `${unit.name} (${pairedMs.name})` : unit.name;
+  const tierColor = tierById(unit.tier).color || "#8d96a6";
   const tagHtml = unit.tags.length
-    ? `<div class="drawer-tags tooltip-tags">${unit.tags.map(tag => `<span class="tooltip-tag ${tagClass(tag)}">${escapeHtml(tag)}</span>`).join("")}</div>`
+    ? `<div class="tooltip-tags">${unit.tags.map(tag => `<span class="tooltip-tag ${tagClass(tag)}">${escapeHtml(tag)}</span>`).join("")}</div>`
     : "";
-  const segmentsHtml = metaUnit ? segmentListHtml(metaUnit, activeSegmentId) : `<div class="segment-chip"><i class="segment-dot"></i><span>No same-week MS meta segments</span></div>`;
   return `
-    <h3>${escapeHtml(title)}</h3>
-    <div class="tooltip-subline">${escapeHtml(unitRowLabel(unit))} · ${escapeHtml(formatWeek(unit.week))}</div>
-    ${tagHtml}
-    ${tooltipInvestmentHtml(unit)}
-    <div class="segment-list">${segmentsHtml}</div>
-    ${tooltipNotesHtml(unit)}
+    <div class="tooltip-card-header">
+      <h3 class="tooltip-card-title">${escapeHtml(title)}</h3>
+      <div class="tooltip-card-context">
+        <span class="tooltip-tier-badge" style="--tooltip-tier-color:${escapeAttr(tierColor)}">${escapeHtml(unitRowLabel(unit))}</span>
+        <span class="tooltip-release">${escapeHtml(formatWeek(unit.week))}</span>
+      </div>
+      ${tagHtml}
+    </div>
+    <div class="tooltip-card-body">
+      ${tooltipInvestmentHtml(unit)}
+      ${metaUnit ? tooltipMetaHtml(metaUnit, activeSegmentId, isPilot(unit)) : ""}
+      ${tooltipNotesHtml(unit)}
+    </div>
   `;
 }
 
+function tooltipSection(title, body, extraClass = "") {
+  if (!body) return "";
+  return `<section class="tooltip-card-section${extraClass ? ` ${extraClass}` : ""}"><div class="tooltip-section-title">${escapeHtml(title)}</div>${body}</section>`;
+}
+
+function investmentStatsHtml(unit, extraClass = "") {
+  if (!isMs(unit)) return "";
+  const minimum = normalizePotentialLevel(unit.minPotential);
+  const ideal = normalizePotentialLevel(unit.idealPotential);
+  if (minimum == null && ideal == null) return "";
+  const stats = [];
+  if (minimum != null) stats.push(`<div class="tooltip-investment-stat"><span class="tooltip-investment-label">Minimum</span><strong class="tooltip-investment-value">P${minimum}</strong></div>`);
+  if (ideal != null) stats.push(`<div class="tooltip-investment-stat"><span class="tooltip-investment-label">Ideal</span><strong class="tooltip-investment-value">P${ideal}</strong></div>`);
+  return `<div class="tooltip-investment-grid${extraClass ? ` ${extraClass}` : ""}">${stats.join("")}</div>`;
+}
 function tooltipInvestmentHtml(unit) {
   if (!isMs(unit)) return "";
   const minimum = normalizePotentialLevel(unit.minPotential);
   const ideal = normalizePotentialLevel(unit.idealPotential);
   if (minimum == null && ideal == null) return "";
-  return `<div class="tooltip-investment"><div class="tooltip-note-title">Investment</div>${minimum != null ? `<div class="tooltip-investment-row"><span>Minimum</span><strong>P${minimum}</strong></div>` : ""}${ideal != null ? `<div class="tooltip-investment-row"><span>Ideal</span><strong>P${ideal}</strong></div>` : ""}</div>`;
+  const stats = [];
+  if (minimum != null) stats.push(`<div class="tooltip-investment-stat"><span class="tooltip-investment-label">Minimum</span><strong class="tooltip-investment-value">P${minimum}</strong></div>`);
+  if (ideal != null) stats.push(`<div class="tooltip-investment-stat"><span class="tooltip-investment-label">Ideal</span><strong class="tooltip-investment-value">P${ideal}</strong></div>`);
+  return tooltipSection("Investment", `<div class="tooltip-investment-summary">${stats.join("")}</div>`, "tooltip-investment");
 }
 function investmentDetailHtml(unit) {
-  if (!isMs(unit)) return "";
-  const minimum = normalizePotentialLevel(unit.minPotential);
-  const ideal = normalizePotentialLevel(unit.idealPotential);
-  if (minimum == null && ideal == null) return "";
-  return `<section class="drawer-section"><h3>Investment</h3>${minimum != null ? `<div class="meta-row"><span class="k">Minimum</span><span>P${minimum}</span></div>` : ""}${ideal != null ? `<div class="meta-row"><span class="k">Ideal</span><span>P${ideal}</span></div>` : ""}</section>`;
+  const stats = investmentStatsHtml(unit, "drawer-investment-grid");
+  return stats ? `<section class="drawer-section"><h3>Investment</h3>${stats}</section>` : "";
 }
 
 function multilineHtml(text) {
@@ -772,12 +795,23 @@ function multilineHtml(text) {
 function tooltipNotesHtml(unit) {
   if (isPilot(unit)) {
     const notes = [unit.notesPvp, unit.notesPve].filter(Boolean).join("\n\n");
-    return notes ? `<div class="tooltip-notes"><div class="tooltip-note-section"><div class="tooltip-note-title">Notes</div><div class="note tooltip-note-body">${multilineHtml(notes)}</div></div></div>` : "";
+    return notes ? tooltipSection("Notes", `<div class="tooltip-note-body">${multilineHtml(notes)}</div>`, "tooltip-notes-section") : "";
   }
-  const sections = [];
-  if (unit.notesPvp) sections.push(`<div class="tooltip-note-section"><div class="tooltip-note-title">PVP</div><div class="note tooltip-note-body">${multilineHtml(unit.notesPvp)}</div></div>`);
-  if (unit.notesPve) sections.push(`<div class="tooltip-note-section"><div class="tooltip-note-title">PVE</div><div class="note tooltip-note-body">${multilineHtml(unit.notesPve)}</div></div>`);
-  return sections.length ? `<div class="tooltip-notes">${sections.join("")}</div>` : "";
+  const blocks = [];
+  if (unit.notesPvp) blocks.push(`<div class="tooltip-note-block"><span class="tooltip-note-mode">PVP</span><div class="tooltip-note-body">${multilineHtml(unit.notesPvp)}</div></div>`);
+  if (unit.notesPve) blocks.push(`<div class="tooltip-note-block"><span class="tooltip-note-mode">PVE</span><div class="tooltip-note-body">${multilineHtml(unit.notesPve)}</div></div>`);
+  return blocks.length ? tooltipSection("Notes", `<div class="tooltip-note-list">${blocks.join("")}</div>`, "tooltip-notes-section") : "";
+}
+
+function tooltipMetaHtml(unit, activeSegmentId = null, inheritedFromMs = false) {
+  const segments = (unit.segments || []).slice().sort((a, b) => a.start - b.start || a.end - b.end);
+  if (!segments.length) return "";
+  const rows = segments.map(seg => {
+    const status = metaStatus(seg.statusId);
+    const active = activeSegmentId === seg.id ? " active" : "";
+    return `<div class="tooltip-meta-row${active}"><i class="tooltip-meta-dot" style="background:${escapeAttr(status.color)}"></i><span class="tooltip-meta-status">${escapeHtml(status.label)}</span><span class="tooltip-meta-range">${escapeHtml(formatWeekRange(seg.start, seg.end))}</span></div>`;
+  }).join("");
+  return tooltipSection(inheritedFromMs ? "MS PVP Meta" : "PVP Meta", `<div class="tooltip-meta-list">${rows}</div>`, "tooltip-meta-section");
 }
 
 function segmentListHtml(unit, activeSegmentId = null) {
