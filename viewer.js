@@ -229,10 +229,16 @@ function normalizeState() {
     }).sort((a, b) => a.start - b.start || a.end - b.end);
 
     const rawTags = Array.isArray(u.tags) ? u.tags : (Array.isArray(u.badges) ? u.badges : []);
+    const kind = sanitizeText(u.kind || u.type) || "custom";
+    const rawNotesPvp = String(u.notesPvp ?? u.pvpNotes ?? u.note ?? "").trim();
+    const rawNotesPve = String(u.notesPve ?? u.pveNotes ?? "").trim();
+    const pilotNotes = String(kind).toLowerCase() === "pilot"
+      ? [rawNotesPvp, rawNotesPve].filter(Boolean).join("\n\n")
+      : rawNotesPvp;
     return {
       id: u.id || `unit-${i}`,
       name: sanitizeText(u.name) || "Unnamed Unit",
-      kind: sanitizeText(u.kind || u.type) || "custom",
+      kind,
       tier,
       week,
       lane: normalizeLane(u.lane || 1),
@@ -240,8 +246,8 @@ function normalizeState() {
       stackOrder: Number(u.stackOrder) || 0,
       icon: resolveIcon(u),
       tags: cleanTags(rawTags),
-      notesPvp: String(u.notesPvp ?? u.pvpNotes ?? u.note ?? "").trim(),
-      notesPve: String(u.notesPve ?? u.pveNotes ?? "").trim(),
+      notesPvp: pilotNotes,
+      notesPve: String(kind).toLowerCase() === "pilot" ? "" : rawNotesPve,
       segments
     };
   });
@@ -531,8 +537,9 @@ function unitDetailHtml(unit, activeSegmentId = null) {
       <h3>Meta timeline${metaUnit && metaUnit.id !== unit.id ? ` · ${escapeHtml(metaUnit.name)}` : ""}</h3>
       <div class="segment-list">${metaHtml}</div>
     </section>
-    ${unit.notesPvp ? `<section class="drawer-section"><h3>PVP Notes</h3><div class="note">${multilineHtml(unit.notesPvp)}</div></section>` : ""}
-    ${unit.notesPve ? `<section class="drawer-section"><h3>PVE Notes</h3><div class="note">${multilineHtml(unit.notesPve)}</div></section>` : ""}
+    ${isPilot(unit)
+      ? (unit.notesPvp ? `<section class="drawer-section"><h3>Notes</h3><div class="note">${multilineHtml(unit.notesPvp)}</div></section>` : "")
+      : `${unit.notesPvp ? `<section class="drawer-section"><h3>PVP Notes</h3><div class="note">${multilineHtml(unit.notesPvp)}</div></section>` : ""}${unit.notesPve ? `<section class="drawer-section"><h3>PVE Notes</h3><div class="note">${multilineHtml(unit.notesPve)}</div></section>` : ""}`}
   `;
 }
 
@@ -608,6 +615,10 @@ function multilineHtml(text) {
 }
 
 function tooltipNotesHtml(unit) {
+  if (isPilot(unit)) {
+    const notes = [unit.notesPvp, unit.notesPve].filter(Boolean).join("\n\n");
+    return notes ? `<div class="tooltip-notes"><div class="tooltip-note-section"><div class="tooltip-note-title">Notes</div><div class="note tooltip-note-body">${multilineHtml(notes)}</div></div></div>` : "";
+  }
   const sections = [];
   if (unit.notesPvp) sections.push(`<div class="tooltip-note-section"><div class="tooltip-note-title">PVP</div><div class="note tooltip-note-body">${multilineHtml(unit.notesPvp)}</div></div>`);
   if (unit.notesPve) sections.push(`<div class="tooltip-note-section"><div class="tooltip-note-title">PVE</div><div class="note tooltip-note-body">${multilineHtml(unit.notesPve)}</div></div>`);
