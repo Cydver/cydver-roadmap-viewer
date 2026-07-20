@@ -63,6 +63,10 @@ let tooltipEl = null;
 let tooltipPinned = false;
 let panDrag = null;
 let suppressRoadmapClick = false;
+const touchPoints = new Map();
+let touchPan = null;
+let pinchGesture = null;
+let suppressTouchClickUntil = 0;
 
 const els = {
   roadmap: document.getElementById("roadmap"),
@@ -90,9 +94,6 @@ async function init() {
 }
 
 function bindControls() {
-  document.getElementById("btnZoomOut").addEventListener("click", () => setZoom(zoomScale - ZOOM_BUTTON_STEP));
-  document.getElementById("btnZoomIn").addEventListener("click", () => setZoom(zoomScale + ZOOM_BUTTON_STEP));
-  document.getElementById("btnFit").addEventListener("click", fitToWidth);
   document.getElementById("btnCloseDrawer").addEventListener("click", closeDrawer);
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
@@ -105,9 +106,14 @@ function bindControls() {
     hideTooltip(true);
   });
   els.roadmap.addEventListener("pointerdown", beginPan);
+  els.chartScroll.addEventListener("wheel", handleWheelZoom, { passive: false });
+  els.chartScroll.addEventListener("pointerdown", beginTouchGesture);
   window.addEventListener("pointermove", movePan);
   window.addEventListener("pointerup", endPan);
   window.addEventListener("pointercancel", endPan);
+  window.addEventListener("pointermove", moveTouchGesture, { passive: false });
+  window.addEventListener("pointerup", endTouchGesture);
+  window.addEventListener("pointercancel", endTouchGesture);
   window.addEventListener("resize", () => applyZoom());
 }
 
@@ -425,7 +431,7 @@ function renderUnit(unit) {
 
   card.addEventListener("click", event => {
     event.stopPropagation();
-    if (suppressRoadmapClick) return;
+    if (suppressRoadmapClick || performance.now() < suppressTouchClickUntil) return;
     bringUnitToFront(unit.id);
     showTooltip(event, unit, null, { pin: true });
   });
@@ -469,6 +475,7 @@ function renderSegment(unit, segment, index = 0, total = 1) {
 
   bar.addEventListener("click", event => {
     event.stopPropagation();
+    if (suppressRoadmapClick || performance.now() < suppressTouchClickUntil) return;
     showTooltip(event, unit, segment, { pin: true });
   });
   bar.addEventListener("dblclick", event => {
@@ -646,6 +653,29 @@ function setZoom(value) {
   applyZoom();
 }
 
+function setZoomAtClientPoint(value, clientX, clientY) {
+  const oldZoom = zoomScale;
+  const nextZoom = clamp(Math.round(Number(value || 1) * 100) / 100, MIN_ZOOM, MAX_ZOOM);
+  if (Math.abs(nextZoom - oldZoom) < 0.0001) return;
+  const rect = els.chartScroll.getBoundingClientRect();
+  const localX = clientX - rect.left;
+  const localY = clientY - rect.top;
+  const contentX = (els.chartScroll.scrollLeft + localX) / oldZoom;
+  const contentY = (els.chartScroll.scrollTop + localY) / oldZoom;
+  setZoom(nextZoom);
+  els.chartScroll.scrollLeft = contentX * zoomScale - localX;
+  els.chartScroll.scrollTop = contentY * zoomScale - localY;
+}
+
+function handleWheelZoom(event) {
+  if (!event.deltaY) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const delta = clamp(event.deltaY, -200, 200);
+  const factor = Math.exp(-delta * 0.0005);
+  setZoomAtClientPoint(zoomScale * factor, event.clientX, event.clientY);
+}
+
 function applyZoom() {
   const width = baseChartWidth();
   const height = baseChartHeight();
@@ -657,7 +687,7 @@ function applyZoom() {
   els.roadmap.style.setProperty("--monthGridLine", `${(gridLinePx * 2).toFixed(2)}px`);
   els.chartStage.style.width = `${width * zoomScale}px`;
   els.chartStage.style.height = `${height * zoomScale}px`;
-  els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
+  if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
 }
 
 function fitToWidth() {
@@ -1082,6 +1112,106 @@ function setMessage(text) {
   } else {
     els.message.textContent = text;
     els.message.classList.remove("hidden");
+  }
+}
+
+function touchPairGeometry() {
+  const points = [...touchPoints.values()].slice(0, 2);
+  if (points.length < 2) return null;
+  const [a, b] = points;
+  return {
+    midpointX: (a.x + b.x) / 2,
+    midpointY: (a.y + b.y) / 2,
+    distance: Math.max(1, Math.hypot(b.x - a.x, b.y - a.y))
+  };
+}
+function beginPinchGesture() {
+  const geometry = touchPairGeometry();
+  if (!geometry) return;
+  const rect = els.chartScroll.getBoundingClientRect();
+  const localX = geometry.midpointX - rect.left;
+  const localY = geometry.midpointY - rect.top;
+  pinchGesture = {
+    startDistance: geometry.distance,
+    startZoom: zoomScale,
+    contentX: (els.chartScroll.scrollLeft + localX) / zoomScale,
+    contentY: (els.chartScroll.scrollTop + localY) / zoomScale,
+    moved: false
+  };
+  touchPan = null;
+}
+function beginTouchGesture(event) {
+  if (event.pointerType !== "touch") return;
+  touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  try { els.chartScroll.setPointerCapture(event.pointerId); } catch {}
+  if (touchPoints.size >= 2) {
+    beginPinchGesture();
+    event.preventDefault();
+    return;
+  }
+  touchPan = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    scrollLeft: els.chartScroll.scrollLeft,
+    scrollTop: els.chartScroll.scrollTop,
+    moved: false
+  };
+}
+function moveTouchGesture(event) {
+  if (event.pointerType !== "touch" || !touchPoints.has(event.pointerId)) return;
+  touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+  if (touchPoints.size >= 2 && pinchGesture) {
+    const geometry = touchPairGeometry();
+    if (!geometry) return;
+    const nextZoom = pinchGesture.startZoom * (geometry.distance / pinchGesture.startDistance);
+    const rect = els.chartScroll.getBoundingClientRect();
+    const localX = geometry.midpointX - rect.left;
+    const localY = geometry.midpointY - rect.top;
+    setZoom(nextZoom);
+    els.chartScroll.scrollLeft = pinchGesture.contentX * zoomScale - localX;
+    els.chartScroll.scrollTop = pinchGesture.contentY * zoomScale - localY;
+    pinchGesture.moved = true;
+    suppressTouchClickUntil = performance.now() + 400;
+    event.preventDefault();
+    return;
+  }
+
+  if (!touchPan || event.pointerId !== touchPan.pointerId) return;
+  const dx = event.clientX - touchPan.startX;
+  const dy = event.clientY - touchPan.startY;
+  if (!touchPan.moved && Math.hypot(dx, dy) > 4) touchPan.moved = true;
+  if (!touchPan.moved) return;
+  els.chartScroll.scrollLeft = touchPan.scrollLeft - dx;
+  els.chartScroll.scrollTop = touchPan.scrollTop - dy;
+  suppressTouchClickUntil = performance.now() + 400;
+  event.preventDefault();
+}
+function endTouchGesture(event) {
+  if (event.pointerType !== "touch" || !touchPoints.has(event.pointerId)) return;
+  const moved = Boolean(touchPan?.moved || pinchGesture?.moved);
+  touchPoints.delete(event.pointerId);
+  try { els.chartScroll.releasePointerCapture(event.pointerId); } catch {}
+  if (moved) suppressTouchClickUntil = performance.now() + 400;
+
+  if (touchPoints.size >= 2) {
+    beginPinchGesture();
+    return;
+  }
+  pinchGesture = null;
+  if (touchPoints.size === 1) {
+    const [pointerId, point] = touchPoints.entries().next().value;
+    touchPan = {
+      pointerId,
+      startX: point.x,
+      startY: point.y,
+      scrollLeft: els.chartScroll.scrollLeft,
+      scrollTop: els.chartScroll.scrollTop,
+      moved: false
+    };
+  } else {
+    touchPan = null;
   }
 }
 
