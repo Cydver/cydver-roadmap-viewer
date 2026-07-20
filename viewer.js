@@ -69,6 +69,8 @@ const touchPoints = new Map();
 let touchPan = null;
 let pinchGesture = null;
 let suppressTouchClickUntil = 0;
+const DIAMOND_PLANNER_STORAGE_KEY = "uceDiamondPlannerV1";
+let diamondPlanner = { balance: 0, spends: {} };
 
 const els = {
   roadmap: document.getElementById("roadmap"),
@@ -80,13 +82,18 @@ const els = {
   zoomLabel: document.getElementById("zoomLabel"),
   drawer: document.getElementById("unitDrawer"),
   drawerContent: document.getElementById("drawerContent"),
-  tooltip: document.getElementById("tooltip")
+  tooltip: document.getElementById("tooltip"),
+  planner: document.getElementById("diamondPlanner"),
+  plannerList: document.getElementById("diamondPlannerList"),
+  plannerBalance: document.getElementById("diamondBalance"),
+  plannerSummary: document.getElementById("diamondPlannerSummary")
 };
 
 document.addEventListener("DOMContentLoaded", init);
 
 async function init() {
   tooltipEl = els.tooltip;
+  loadDiamondPlanner();
   bindControls();
   await loadOptionalCatalog();
   await loadRoadmap();
@@ -97,9 +104,18 @@ async function init() {
 
 function bindControls() {
   document.getElementById("btnCloseDrawer").addEventListener("click", closeDrawer);
+  document.getElementById("btnOpenDiamondPlanner")?.addEventListener("click", openDiamondPlanner);
+  document.getElementById("btnCloseDiamondPlanner")?.addEventListener("click", closeDiamondPlanner);
+  document.getElementById("btnClearDiamondPlanner")?.addEventListener("click", clearDiamondPlanner);
+  els.plannerBalance?.addEventListener("input", () => {
+    diamondPlanner.balance = Math.max(0, Math.round(Number(els.plannerBalance.value) || 0));
+    saveDiamondPlanner();
+    renderDiamondPlanner();
+  });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     closeDrawer();
+    closeDiamondPlanner();
     hideTooltip(true);
   });
   document.addEventListener("pointerdown", (event) => {
@@ -255,6 +271,8 @@ function normalizeState() {
       stackOrder: Number(u.stackOrder) || 0,
       icon: resolveIcon(u),
       tags: cleanTags(rawTags),
+      minPotential: String(kind).toLowerCase() === "ms" ? normalizePotentialLevel(u.minPotential ?? u.minimumPotential ?? u.minP) : null,
+      idealPotential: String(kind).toLowerCase() === "ms" ? normalizePotentialLevel(u.idealPotential ?? u.recommendedPotential ?? u.idealP) : null,
       notesPvp: pilotNotes,
       notesPve: String(kind).toLowerCase() === "pilot" ? "" : rawNotesPve,
       segments
@@ -289,6 +307,7 @@ function renderAll() {
   renderLegend();
   renderChart();
   applyZoom();
+  renderDiamondPlanner();
 }
 
 function renderSummary() {
@@ -511,6 +530,7 @@ function openDrawer(unitId, segmentId = null) {
   const unit = state.units.find(u => u.id === unitId);
   if (!unit) return;
   activeUnitId = unit.id;
+  closeDiamondPlanner();
   els.drawerContent.innerHTML = unitDetailHtml(unit, segmentId);
   els.drawer.classList.remove("hidden");
   renderChart();
@@ -546,6 +566,7 @@ function unitDetailHtml(unit, activeSegmentId = null) {
       <div class="meta-row"><span class="k">Release</span><span>${escapeHtml(formatWeek(unit.week))}</span></div>
       <div class="meta-row"><span class="k">Type</span><span>${escapeHtml(unit.kind || "custom")}</span></div>
     </section>
+    ${investmentDetailHtml(unit)}
     <section class="drawer-section">
       <h3>Meta timeline${metaUnit && metaUnit.id !== unit.id ? ` · ${escapeHtml(metaUnit.name)}` : ""}</h3>
       <div class="segment-list">${metaHtml}</div>
@@ -554,6 +575,53 @@ function unitDetailHtml(unit, activeSegmentId = null) {
       ? (unit.notesPvp ? `<section class="drawer-section"><h3>Notes</h3><div class="note">${multilineHtml(unit.notesPvp)}</div></section>` : "")
       : `${unit.notesPvp ? `<section class="drawer-section"><h3>PVP Notes</h3><div class="note">${multilineHtml(unit.notesPvp)}</div></section>` : ""}${unit.notesPve ? `<section class="drawer-section"><h3>PVE Notes</h3><div class="note">${multilineHtml(unit.notesPve)}</div></section>` : ""}`}
   `;
+}
+
+function loadDiamondPlanner() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(DIAMOND_PLANNER_STORAGE_KEY) || "null");
+    if (raw && typeof raw === "object") diamondPlanner = { balance: Math.max(0, Math.round(Number(raw.balance) || 0)), spends: raw.spends && typeof raw.spends === "object" ? raw.spends : {} };
+  } catch { diamondPlanner = { balance: 0, spends: {} }; }
+}
+function saveDiamondPlanner() {
+  try { localStorage.setItem(DIAMOND_PLANNER_STORAGE_KEY, JSON.stringify(diamondPlanner)); } catch {}
+}
+function openDiamondPlanner() {
+  closeDrawer();
+  renderDiamondPlanner();
+  els.planner?.classList.remove("hidden");
+}
+function closeDiamondPlanner() { els.planner?.classList.add("hidden"); }
+function clearDiamondPlanner() {
+  diamondPlanner = { balance: 0, spends: {} };
+  saveDiamondPlanner();
+  renderDiamondPlanner();
+}
+function plannedSpend(unitId) { return Math.max(0, Math.round(Number(diamondPlanner.spends?.[unitId]) || 0)); }
+function formatDiamonds(value) { return Math.round(Number(value) || 0).toLocaleString("en-US"); }
+function renderDiamondPlanner() {
+  if (!els.plannerList || !els.plannerBalance || !els.plannerSummary) return;
+  if (document.activeElement !== els.plannerBalance) els.plannerBalance.value = String(diamondPlanner.balance || 0);
+  const units = state.units.filter(isMs).slice().sort((a,b) => normalizeWeek(a.week)-normalizeWeek(b.week) || tierIndex(a.tier)-tierIndex(b.tier) || a.name.localeCompare(b.name));
+  let running = diamondPlanner.balance || 0;
+  let total = 0;
+  els.plannerList.innerHTML = "";
+  units.forEach(unit => {
+    const spend = plannedSpend(unit.id); total += spend; running -= spend;
+    const row = document.createElement("div");
+    row.className = "diamond-plan-row";
+    row.innerHTML = `<div class="diamond-plan-main"><strong>${escapeHtml(unit.name)}</strong><small>${escapeHtml(formatWeek(unit.week))} · ${escapeHtml(tierById(unit.tier).label)}</small></div><label><span>Spend</span><input type="number" min="0" step="100" inputmode="numeric" value="${spend || ""}" aria-label="Planned diamond spend for ${escapeAttr(unit.name)}"></label><div class="diamond-plan-balance${running < 0 ? " negative" : ""}">${formatDiamonds(running)}</div>`;
+    const input = row.querySelector("input");
+    input.addEventListener("change", () => {
+      const value = Math.max(0, Math.round(Number(input.value) || 0));
+      if (value) diamondPlanner.spends[unit.id] = value; else delete diamondPlanner.spends[unit.id];
+      saveDiamondPlanner();
+      renderDiamondPlanner();
+    });
+    els.plannerList.appendChild(row);
+  });
+  const remaining = (diamondPlanner.balance || 0) - total;
+  els.plannerSummary.innerHTML = `<span>Planned <strong>${formatDiamonds(total)}</strong></span><span>Remaining <strong class="${remaining < 0 ? "negative" : ""}">${formatDiamonds(remaining)}</strong></span>`;
 }
 
 window.__ucePlaceholder = function(name) {
@@ -676,9 +744,25 @@ function tooltipHtml(unit, activeSegmentId = null) {
     <h3>${escapeHtml(title)}</h3>
     <div class="tooltip-subline">${escapeHtml(unitRowLabel(unit))} · ${escapeHtml(formatWeek(unit.week))}</div>
     ${tagHtml}
+    ${tooltipInvestmentHtml(unit)}
     <div class="segment-list">${segmentsHtml}</div>
     ${tooltipNotesHtml(unit)}
   `;
+}
+
+function tooltipInvestmentHtml(unit) {
+  if (!isMs(unit)) return "";
+  const minimum = normalizePotentialLevel(unit.minPotential);
+  const ideal = normalizePotentialLevel(unit.idealPotential);
+  if (minimum == null && ideal == null) return "";
+  return `<div class="tooltip-investment"><div class="tooltip-note-title">Investment</div>${minimum != null ? `<div class="tooltip-investment-row"><span>Minimum</span><strong>P${minimum}</strong></div>` : ""}${ideal != null ? `<div class="tooltip-investment-row"><span>Ideal</span><strong>P${ideal}</strong></div>` : ""}</div>`;
+}
+function investmentDetailHtml(unit) {
+  if (!isMs(unit)) return "";
+  const minimum = normalizePotentialLevel(unit.minPotential);
+  const ideal = normalizePotentialLevel(unit.idealPotential);
+  if (minimum == null && ideal == null) return "";
+  return `<section class="drawer-section"><h3>Investment</h3>${minimum != null ? `<div class="meta-row"><span class="k">Minimum</span><span>P${minimum}</span></div>` : ""}${ideal != null ? `<div class="meta-row"><span class="k">Ideal</span><span>P${ideal}</span></div>` : ""}</section>`;
 }
 
 function multilineHtml(text) {
@@ -947,6 +1031,7 @@ function rowOffsetLabel(value, tierId = null) {
   return "Between rows";
 }
 function unitRowLabel(unit) { return normalizeRowOffset(unit.rowOffset) ? rowOffsetLabel(unit.rowOffset, unit.tier) : tierById(unit.tier).label; }
+function normalizePotentialLevel(value) { if (value === "" || value === null || value === undefined) return null; const n = Number(value); return Number.isFinite(n) ? clamp(Math.round(n), 0, 5) : null; }
 function isPilot(unit) { return String(unit?.kind || "").toLowerCase() === "pilot"; }
 function isMs(unit) { return String(unit?.kind || "").toLowerCase() === "ms"; }
 function hasMetaBars(unit) { return !isPilot(unit); }

@@ -15,6 +15,9 @@
         <h1>Cydver's Pull Roadmap</h1>
         <p id="summary" class="summary">Loading roadmap…</p>
       </section>
+      <div class="viewer-controls">
+        <button id="btnOpenDiamondPlanner" type="button">Diamond Planner</button>
+      </div>
     </header>
 
     <section class="legend-panel" aria-label="Meta status legend">
@@ -29,6 +32,24 @@
       </div>
     </section>
   </main>
+
+  <aside id="diamondPlanner" class="diamond-planner-drawer hidden" aria-label="Personal diamond planner">
+    <div class="diamond-planner-head">
+      <div>
+        <p class="eyebrow">Private · stored on this device</p>
+        <h2>Diamond Planner</h2>
+      </div>
+      <button id="btnCloseDiamondPlanner" class="drawer-close" type="button" aria-label="Close diamond planner">×</button>
+    </div>
+    <div class="diamond-balance-field">
+      <label for="diamondBalance">Current diamonds</label>
+      <input id="diamondBalance" type="number" min="0" step="100" inputmode="numeric" />
+    </div>
+    <div id="diamondPlannerSummary" class="diamond-planner-summary"></div>
+    <div class="diamond-plan-columns"><span>Future MS pull</span><span>Planned spend</span><span>Balance</span></div>
+    <div id="diamondPlannerList" class="diamond-planner-list"></div>
+    <button id="btnClearDiamondPlanner" class="diamond-clear" type="button">Clear private plan</button>
+  </aside>
 
   <aside id="unitDrawer" class="unit-drawer hidden" aria-live="polite">
     <button id="btnCloseDrawer" class="drawer-close" type="button" aria-label="Close">×</button>
