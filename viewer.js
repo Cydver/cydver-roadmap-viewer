@@ -240,7 +240,8 @@ function normalizeState() {
       stackOrder: Number(u.stackOrder) || 0,
       icon: resolveIcon(u),
       tags: cleanTags(rawTags),
-      note: String(u.note || "").trim(),
+      notesPvp: String(u.notesPvp ?? u.pvpNotes ?? u.note ?? "").trim(),
+      notesPve: String(u.notesPve ?? u.pveNotes ?? "").trim(),
       segments
     };
   });
@@ -530,7 +531,8 @@ function unitDetailHtml(unit, activeSegmentId = null) {
       <h3>Meta timeline${metaUnit && metaUnit.id !== unit.id ? ` · ${escapeHtml(metaUnit.name)}` : ""}</h3>
       <div class="segment-list">${metaHtml}</div>
     </section>
-    ${unit.note ? `<section class="drawer-section"><h3>Note</h3><div class="note">${escapeHtml(unit.note)}</div></section>` : ""}
+    ${unit.notesPvp ? `<section class="drawer-section"><h3>PVP Notes</h3><div class="note">${multilineHtml(unit.notesPvp)}</div></section>` : ""}
+    ${unit.notesPve ? `<section class="drawer-section"><h3>PVE Notes</h3><div class="note">${multilineHtml(unit.notesPve)}</div></section>` : ""}
   `;
 }
 
@@ -597,8 +599,19 @@ function tooltipHtml(unit, activeSegmentId = null) {
     <div class="tooltip-subline">${escapeHtml(unitRowLabel(unit))} · ${escapeHtml(formatWeek(unit.week))}</div>
     ${tagHtml}
     <div class="segment-list">${segmentsHtml}</div>
-    ${unit.note ? `<div class="note">${escapeHtml(unit.note)}</div>` : ""}
+    ${tooltipNotesHtml(unit)}
   `;
+}
+
+function multilineHtml(text) {
+  return escapeHtml(String(text || "").trim()).replace(/\r?\n/g, "<br>");
+}
+
+function tooltipNotesHtml(unit) {
+  const sections = [];
+  if (unit.notesPvp) sections.push(`<div class="tooltip-note-section"><div class="tooltip-note-title">PVP</div><div class="note tooltip-note-body">${multilineHtml(unit.notesPvp)}</div></div>`);
+  if (unit.notesPve) sections.push(`<div class="tooltip-note-section"><div class="tooltip-note-title">PVE</div><div class="note tooltip-note-body">${multilineHtml(unit.notesPve)}</div></div>`);
+  return sections.length ? `<div class="tooltip-notes">${sections.join("")}</div>` : "";
 }
 
 function segmentListHtml(unit, activeSegmentId = null) {
