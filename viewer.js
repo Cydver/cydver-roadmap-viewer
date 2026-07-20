@@ -61,6 +61,8 @@ let zoomScale = 1;
 let activeUnitId = null;
 let tooltipEl = null;
 let tooltipPinned = false;
+let unitProfileOverlay = null;
+let profileReturnFocus = null;
 let appTooltipEl = null;
 let appTooltipPinned = false;
 let panDrag = null;
@@ -114,6 +116,7 @@ function bindControls() {
   });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
+    if (unitProfileOverlay) { closeUnitProfile(); return; }
     closeDrawer();
     closeDiamondPlanner();
     hideTooltip(true);
@@ -458,11 +461,7 @@ function renderUnit(unit) {
     event.stopPropagation();
     if (suppressRoadmapClick || performance.now() < suppressTouchClickUntil) return;
     bringUnitToFront(unit.id);
-    showTooltip(event, unit, null, { pin: true });
-  });
-  card.addEventListener("dblclick", event => {
-    event.stopPropagation();
-    openDrawer(unit.id);
+    openUnitProfile(unit.id);
   });
   card.addEventListener("mouseenter", event => {
     bringUnitToFront(unit.id);
@@ -473,7 +472,7 @@ function renderUnit(unit) {
   card.addEventListener("keydown", event => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      openDrawer(unit.id);
+      openUnitProfile(unit.id);
     }
   });
   els.roadmap.appendChild(card);
@@ -501,11 +500,7 @@ function renderSegment(unit, segment, index = 0, total = 1) {
   bar.addEventListener("click", event => {
     event.stopPropagation();
     if (suppressRoadmapClick || performance.now() < suppressTouchClickUntil) return;
-    showTooltip(event, unit, segment, { pin: true });
-  });
-  bar.addEventListener("dblclick", event => {
-    event.stopPropagation();
-    openDrawer(unit.id, segment.id);
+    openUnitProfile(unit.id, segment.id);
   });
   bar.addEventListener("mouseenter", event => showTooltip(event, unit, segment));
   bar.addEventListener("mouseleave", () => hideTooltip(false));
@@ -513,7 +508,7 @@ function renderSegment(unit, segment, index = 0, total = 1) {
   bar.addEventListener("keydown", event => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      openDrawer(unit.id, segment.id);
+      openUnitProfile(unit.id, segment.id);
     }
   });
   els.roadmap.appendChild(bar);
@@ -687,6 +682,128 @@ function hideAppTooltip(force = false) {
   appTooltipEl?.remove();
   appTooltipEl = null;
   appTooltipPinned = false;
+}
+
+
+function profileTagsHtml(unit) {
+  if (!unit?.tags?.length) return "";
+  return `<div class="unit-profile-tags">${unit.tags.map(tag => `<span class="unit-profile-tag ${tagClass(tag)}">${escapeHtml(tag)}</span>`).join("")}</div>`;
+}
+
+function profileArtHtml(unit, typeLabel) {
+  if (!unit) return `<div class="unit-profile-art empty"><div class="unit-profile-placeholder">?</div><span>${escapeHtml(typeLabel)}</span></div>`;
+  const image = unit.icon
+    ? `<img class="unit-profile-image" src="${escapeAttr(unit.icon)}" alt="${escapeAttr(unit.name)}"><div class="unit-profile-placeholder image-fallback">${escapeHtml(initials(unit.name))}</div>`
+    : `<div class="unit-profile-placeholder">${escapeHtml(initials(unit.name))}</div>`;
+  return `<div class="unit-profile-art">${image}</div>`;
+}
+
+function profileContextHtml(unit) {
+  if (!unit) return "";
+  const color = tierById(unit.tier).color || "#8d96a6";
+  return `<div class="unit-profile-context"><span class="unit-profile-tier" style="--profile-tier-color:${escapeAttr(color)}">${escapeHtml(unitRowLabel(unit))}</span><span>${escapeHtml(formatWeek(unit.week))}</span></div>`;
+}
+
+function profileInvestmentHtml(unit) {
+  if (!isMs(unit)) return "";
+  const minimum = normalizePotentialLevel(unit.minPotential);
+  const ideal = normalizePotentialLevel(unit.idealPotential);
+  if (minimum == null && ideal == null) return "";
+  const cells = [];
+  if (minimum != null) cells.push(`<div class="unit-profile-investment-stat"><span>Minimum</span><strong>P${minimum}</strong></div>`);
+  if (ideal != null) cells.push(`<div class="unit-profile-investment-stat"><span>Ideal</span><strong>P${ideal}</strong></div>`);
+  return `<section class="unit-profile-section"><div class="unit-profile-section-title">Investment</div><div class="unit-profile-investment">${cells.join("")}</div></section>`;
+}
+
+function profileMetaHtml(unit, activeSegmentId = null) {
+  if (!unit) return "";
+  const segments = (unit.segments || []).slice().sort((a, b) => a.start - b.start || a.end - b.end);
+  if (!segments.length) return "";
+  const rows = segments.map(seg => {
+    const status = metaStatus(seg.statusId);
+    const description = String(status.description || "").trim();
+    return `<div class="unit-profile-meta-row${activeSegmentId === seg.id ? " active" : ""}"><i style="background:${escapeAttr(status.color)}"></i><div class="unit-profile-meta-copy"><div class="unit-profile-meta-top"><strong>${escapeHtml(status.label)}</strong><span>${escapeHtml(formatWeekRange(seg.start, seg.end))}</span></div>${description ? `<p>${multilineHtml(description)}</p>` : ""}</div></div>`;
+  }).join("");
+  return `<section class="unit-profile-section"><div class="unit-profile-section-title">PVP Meta</div><div class="unit-profile-meta-list">${rows}</div></section>`;
+}
+
+function profileMsNotesHtml(unit) {
+  if (!unit) return "";
+  const blocks = [];
+  if (unit.notesPvp) blocks.push(`<div class="unit-profile-note"><span>PVP</span><div>${multilineHtml(unit.notesPvp)}</div></div>`);
+  if (unit.notesPve) blocks.push(`<div class="unit-profile-note"><span>PVE</span><div>${multilineHtml(unit.notesPve)}</div></div>`);
+  return blocks.length ? `<section class="unit-profile-section"><div class="unit-profile-section-title">Notes</div><div class="unit-profile-notes">${blocks.join("")}</div></section>` : "";
+}
+
+function profilePilotNotesHtml(unit) {
+  if (!unit) return "";
+  const notes = [unit.notesPvp, unit.notesPve].filter(Boolean).join("\n\n");
+  return notes ? `<section class="unit-profile-section"><div class="unit-profile-section-title">Notes</div><div class="unit-profile-pilot-note">${multilineHtml(notes)}</div></section>` : "";
+}
+
+function profilePanelHeaderHtml(unit, label, emptyMessage) {
+  if (!unit) {
+    return `<div class="unit-profile-empty">${profileArtHtml(null, label)}<div><span class="unit-profile-eyebrow">${escapeHtml(label)}</span><h2>${escapeHtml(emptyMessage)}</h2><p>This roadmap entry does not currently have a paired ${label.toLowerCase()} in the same release slot.</p></div></div>`;
+  }
+  return `<div class="unit-profile-hero">${profileArtHtml(unit, label)}<div class="unit-profile-identity"><span class="unit-profile-eyebrow">${escapeHtml(label)}</span><h2>${escapeHtml(unit.name)}</h2>${profileContextHtml(unit)}${profileTagsHtml(unit)}</div></div>`;
+}
+
+function openUnitProfile(unitId, activeSegmentId = null) {
+  const clicked = state.units.find(unit => unit.id === unitId);
+  if (!clicked || (!isMs(clicked) && !isPilot(clicked))) return;
+  hideTooltip(true);
+  hideAppTooltip(true);
+  closeDrawer();
+  closeDiamondPlanner();
+  closeUnitProfile();
+
+  const ms = isMs(clicked) ? clicked : pairedMsForPilot(clicked);
+  const pilot = isPilot(clicked) ? clicked : pairedPilotForMs(clicked);
+  const activeId = ms ? (activeSegmentId || ms.segments?.[0]?.id || null) : null;
+  profileReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+  const overlay = document.createElement("div");
+  overlay.className = "unit-profile-overlay";
+  overlay.innerHTML = `
+    <article class="unit-profile-card" role="dialog" aria-modal="true" aria-label="${escapeAttr(ms?.name || pilot?.name || "Unit profile")}">
+      <button class="unit-profile-close" type="button" aria-label="Close profile">×</button>
+      <div class="unit-profile-grid">
+        <section class="unit-profile-panel unit-profile-ms-panel">
+          ${profilePanelHeaderHtml(ms, "MOBILE SUIT", "No paired MS")}
+          ${ms ? profileInvestmentHtml(ms) : ""}
+          ${ms ? profileMetaHtml(ms, activeId) : ""}
+          ${ms ? profileMsNotesHtml(ms) : ""}
+        </section>
+        <section class="unit-profile-panel unit-profile-pilot-panel">
+          ${profilePanelHeaderHtml(pilot, "PILOT", "No paired pilot")}
+          ${pilot ? profilePilotNotesHtml(pilot) : ""}
+        </section>
+      </div>
+    </article>`;
+
+  overlay.addEventListener("click", event => { if (event.target === overlay) closeUnitProfile(); });
+  overlay.querySelector(".unit-profile-close")?.addEventListener("click", closeUnitProfile);
+  overlay.querySelectorAll(".unit-profile-image").forEach(img => {
+    img.addEventListener("error", () => {
+      img.style.display = "none";
+      const fallback = img.nextElementSibling;
+      if (fallback) fallback.classList.remove("image-fallback");
+    }, { once: true });
+  });
+  document.body.appendChild(overlay);
+  document.body.classList.add("unit-profile-open");
+  unitProfileOverlay = overlay;
+  overlay.querySelector(".unit-profile-close")?.focus({ preventScroll: true });
+}
+
+function closeUnitProfile() {
+  if (!unitProfileOverlay) return;
+  const overlay = unitProfileOverlay;
+  unitProfileOverlay = null;
+  overlay.remove();
+  document.body.classList.remove("unit-profile-open");
+  if (profileReturnFocus?.isConnected) profileReturnFocus.focus({ preventScroll: true });
+  profileReturnFocus = null;
 }
 
 function showTooltip(event, unit, activeSegment = null, options = {}) {
@@ -1060,7 +1177,7 @@ function rowOffsetLabel(value, tierId = null) {
   if (index >= 0) {
     const upper = offset < 0 ? tiers[index - 1] : tiers[index];
     const lower = offset < 0 ? tiers[index] : tiers[index + 1];
-    if (upper && lower) return `${upper.label} - ${lower.label}`;
+    if (upper && lower) return `${upper.label} / ${lower.label}`;
   }
   return "Between rows";
 }
@@ -1201,6 +1318,17 @@ function pairedMsForPilot(pilot) {
     const bDistance = Math.abs(tierIndex(b.tier) + normalizeRowOffset(b.rowOffset) - (tierIndex(pilot.tier) + normalizeRowOffset(pilot.rowOffset)));
     return aDistance - bDistance || visualStackRank(a) - visualStackRank(b) || a.name.localeCompare(b.name);
   })[0] || null;
+}
+function pairedPilotForMs(ms) {
+  if (!isMs(ms)) return null;
+  return state.units
+    .filter(isPilot)
+    .filter(pilot => pairedMsForPilot(pilot)?.id === ms.id)
+    .sort((a, b) => {
+      const aExact = sameVisualSlot(a, ms) ? 1 : 0;
+      const bExact = sameVisualSlot(b, ms) ? 1 : 0;
+      return bExact - aExact || (Number(a.stackOrder) || 0) - (Number(b.stackOrder) || 0) || a.name.localeCompare(b.name);
+    })[0] || null;
 }
 function metaOwnerForUnit(unit) { return isPilot(unit) ? (pairedMsForPilot(unit) || null) : unit; }
 function syncPilotLanes() {
