@@ -18,8 +18,14 @@ const OLD_STATUS_MAP = { top: "s1", strong: "s3", niche: "s5", fading: "s4", cus
 const LEGACY_TIER_COLORS = { must: ["#ffa12a"], ideal: ["#47a9ff"], luxury: ["#a66bff"], skip: ["#9aa0ab", "#c18cff", "#a66bff", "#8b5cf6", "#9333ea", "#7c3aed", "#6d28d9"] };
 const LEGACY_TIER_LABELS = { must: ["Era-Defining"], ideal: ["Strong"], luxury: ["Rotational"] };
 const LEGACY_STATUS_COLORS = { s2: "#37e6ff" };
-const TAG_OPTIONS = ["PVP", "PVE", "Must P5", "Core", "Tech", "Def", "Sub", "CB"];
+const TAG_OPTIONS = ["PVP", "PVE", "Must P5", "Buff", "Core", "Tech", "Def", "Sub", "CB"];
+const MAX_TAGS = 10;
+const TAGS_PER_COLUMN = 5;
+const MIN_ZOOM = 0.2;
+const MAX_ZOOM = 1.6;
+const ZOOM_BUTTON_STEP = 0.05;
 const MUST_P5_TAG = "Must P5";
+const BUFF_TAG = "Buff";
 const TAG_ORDER = new Map(TAG_OPTIONS.map((tag, i) => [tag.toLowerCase(), i]));
 
 const CELL_W = 200;
@@ -31,11 +37,13 @@ const BLANK_TIER_H = 250;
 const ICON_W = 176;
 const ICON_TOP = 28;
 const ICON_STACK_GAP = 14;
-const COMPACT_PILOT_W = 96;
-const COMPACT_STACK_GAP = 8;
+const BETWEEN_PAIR_GAP = 8;
+const WIDE_CELL_W = ICON_W * 2 + BETWEEN_PAIR_GAP + 24;
 const BAR_TOP = 222;
 const BAR_GAP = 23;
 const BAR_H = 18;
+const META_LINK_H = BAR_H;
+const META_LINK_OVERLAP = 3;
 const BAR_BOTTOM_PAD = 34;
 
 const DEFAULT_STATE = {
@@ -52,6 +60,9 @@ let catalogIndex = new Map();
 let zoomScale = 1;
 let activeUnitId = null;
 let tooltipEl = null;
+let tooltipPinned = false;
+let panDrag = null;
+let suppressRoadmapClick = false;
 
 const els = {
   roadmap: document.getElementById("roadmap"),
@@ -79,11 +90,24 @@ async function init() {
 }
 
 function bindControls() {
-  document.getElementById("btnZoomOut").addEventListener("click", () => setZoom(zoomScale - 0.1));
-  document.getElementById("btnZoomIn").addEventListener("click", () => setZoom(zoomScale + 0.1));
+  document.getElementById("btnZoomOut").addEventListener("click", () => setZoom(zoomScale - ZOOM_BUTTON_STEP));
+  document.getElementById("btnZoomIn").addEventListener("click", () => setZoom(zoomScale + ZOOM_BUTTON_STEP));
   document.getElementById("btnFit").addEventListener("click", fitToWidth);
   document.getElementById("btnCloseDrawer").addEventListener("click", closeDrawer);
-  document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeDrawer(); });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    closeDrawer();
+    hideTooltip(true);
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    if (event.target.closest?.(".unit-card, .meta-bar, .unit-drawer, .viewer-controls, .topbar, .legend-panel, button, a, input, select, textarea")) return;
+    hideTooltip(true);
+  });
+  els.roadmap.addEventListener("pointerdown", beginPan);
+  window.addEventListener("pointermove", movePan);
+  window.addEventListener("pointerup", endPan);
+  window.addEventListener("pointercancel", endPan);
   window.addEventListener("resize", () => applyZoom());
 }
 
@@ -183,9 +207,10 @@ function normalizeState() {
     const tier = tierIdsSet.has(u.tier) ? u.tier : "must";
     const week = normalizeWeek(u.week || u.releaseWeek || 1);
     const oldStatus = OLD_STATUS_MAP[u.metaStatus] || u.metaStatus || fallbackStatus;
-    let segments = Array.isArray(u.segments) ? u.segments : [];
+    const hasExplicitSegments = Array.isArray(u.segments);
+    let segments = hasExplicitSegments ? u.segments : [];
 
-    if (!segments.length) {
+    if (!hasExplicitSegments) {
       const start = normalizeWeek(u.metaStart || week);
       const end = normalizeWeek(u.metaEnd || start);
       segments = [{ id: `${u.id || i}-seg-0`, start: Math.min(start, end), end: Math.max(start, end), statusId: oldStatus }];
@@ -278,17 +303,16 @@ function renderChart() {
 
   addDiv("month-head corner", { left: "0px", width: `${LEFT_W}px` });
 
-  const monthWeeks = getMonthWeeks();
   state.months.forEach((month, i) => {
     const el = addDiv("month-head", {
       left: `${weekX(monthStartWeek(i))}px`,
-      width: `${monthWeeks[i] * CELL_W}px`
+      width: `${monthPixelWidth(i)}px`
     });
     el.textContent = month;
   });
 
   for (let w = 1; w <= weekCount(); w++) {
-    const el = addDiv("week-head", { left: `${weekX(w)}px` });
+    const el = addDiv("week-head", { left: `${weekX(w)}px`, width: `${weekWidth(w)}px` });
     el.textContent = `W${weekToMonthWeek(w).weekInMonth}`;
   }
 
@@ -309,7 +333,7 @@ function renderChart() {
   }, 0);
   for (let w = 0; w <= weekCount(); w++) {
     const line = addDiv(`grid-line v${monthBoundaries.has(w) ? " month" : ""}`, {
-      left: `${LEFT_W + w * CELL_W}px`
+      left: `${weekBoundaryX(w)}px`
     });
     line.style.height = monthBoundaries.has(w) ? "100%" : `${height - HEADER_H}px`;
   }
@@ -319,14 +343,21 @@ function renderChart() {
 
   getTiers().forEach(tier => {
     for (let lane = 1; lane <= visibleLaneCount(tier.id); lane++) {
-      addDiv("lane-track", { top: `${laneY(tier.id, lane)}px` });
+      addDiv("lane-track", {
+        top: `${laneY(tier.id, lane)}px`,
+        width: `${Math.max(4, width - LEFT_W - 20)}px`
+      });
     }
   });
 
   state.units
-    .filter(hasMetaBars)
+    .filter(hasVisibleMetaSegments)
     .sort((a, b) => laneY(a) - laneY(b) || normalizeWeek(a.week) - normalizeWeek(b.week) || a.name.localeCompare(b.name))
-    .forEach(unit => unit.segments.forEach(segment => renderSegment(unit, segment)));
+    .forEach(unit => {
+      renderMetaSegmentLinks(unit);
+      const segments = sortedVisibleSegments(unit);
+      segments.forEach((segment, index) => renderSegment(unit, segment, index, segments.length));
+    });
 
   state.units
     .slice()
@@ -336,10 +367,9 @@ function renderChart() {
 
 function renderUnit(unit) {
   const slot = sameSlotOffset(unit);
-  const compactPilot = slot.compact && isPilot(unit);
   const size = slot.size || ICON_W;
   const card = document.createElement("article");
-  card.className = `unit-card${activeUnitId === unit.id ? " active" : ""}${hasMustP5(unit) ? " must-p5" : ""}${normalizeRowOffset(unit.rowOffset) ? " between-row" : ""}${compactPilot ? " compact-pilot" : ""}`;
+  card.className = `unit-card${activeUnitId === unit.id ? " active" : ""}${hasMustP5(unit) ? " must-p5" : ""}${hasBuff(unit) ? " buff" : ""}${normalizeRowOffset(unit.rowOffset) ? " between-row" : ""}`;
   card.dataset.id = unit.id;
   card.style.left = `${iconX(unit)}px`;
   card.style.top = `${iconY(unit)}px`;
@@ -360,17 +390,17 @@ function renderUnit(unit) {
     card.appendChild(placeholder(unit.name));
   }
 
-  const displayTags = unit.tags.slice(0, 8);
+  const displayTags = unit.tags.slice(0, MAX_TAGS);
   const tags = document.createElement("div");
-  tags.className = `tags${displayTags.length > 5 ? " two-col" : ""}`;
+  tags.className = `tags${displayTags.length > TAGS_PER_COLUMN ? " two-col" : ""}`;
   const appendTag = (container, tag) => {
     const span = document.createElement("span");
     span.className = `tag ${tagClass(tag)}`;
     span.textContent = tag;
     container.appendChild(span);
   };
-  if (displayTags.length > 5) {
-    [displayTags.slice(0, 5), displayTags.slice(5)].forEach(colTags => {
+  if (displayTags.length > TAGS_PER_COLUMN) {
+    [displayTags.slice(TAGS_PER_COLUMN), displayTags.slice(0, TAGS_PER_COLUMN)].forEach(colTags => {
       const column = document.createElement("div");
       column.className = "tag-column";
       colTags.forEach(tag => appendTag(column, tag));
@@ -386,9 +416,21 @@ function renderUnit(unit) {
   plate.textContent = unit.name;
   card.appendChild(plate);
 
-  card.addEventListener("click", () => openDrawer(unit.id));
-  card.addEventListener("mouseenter", event => { bringUnitToFront(unit.id); showTooltip(event, unit); });
-  card.addEventListener("mouseleave", hideTooltip);
+  card.addEventListener("click", event => {
+    event.stopPropagation();
+    if (suppressRoadmapClick) return;
+    bringUnitToFront(unit.id);
+    showTooltip(event, unit, null, { pin: true });
+  });
+  card.addEventListener("dblclick", event => {
+    event.stopPropagation();
+    openDrawer(unit.id);
+  });
+  card.addEventListener("mouseenter", event => {
+    bringUnitToFront(unit.id);
+    showTooltip(event, unit);
+  });
+  card.addEventListener("mouseleave", () => hideTooltip(false));
   card.addEventListener("pointermove", moveTooltip);
   card.addEventListener("keydown", event => {
     if (event.key === "Enter" || event.key === " ") {
@@ -399,13 +441,16 @@ function renderUnit(unit) {
   els.roadmap.appendChild(card);
 }
 
-function renderSegment(unit, segment) {
-  if (!hasMetaBars(unit)) return;
+function renderSegment(unit, segment, index = 0, total = 1) {
+  if (!hasVisibleMetaSegments(unit)) return;
+  const rect = segmentBarRect(unit, segment);
   const bar = document.createElement("div");
-  bar.className = `meta-bar${activeUnitId === unit.id ? " active" : ""}`;
-  bar.style.left = `${weekX(segment.start) + 12}px`;
-  bar.style.top = `${laneY(unit)}px`;
-  bar.style.width = `${(segment.end - segment.start + 1) * CELL_W - 24}px`;
+  const isFirst = index === 0;
+  const isLast = index === total - 1;
+  bar.className = `meta-bar${activeUnitId === unit.id ? " active" : ""}${isFirst ? " segment-first" : " segment-inner-left"}${isLast ? " segment-last" : " segment-inner-right"}`;
+  bar.style.left = `${rect.x}px`;
+  bar.style.top = `${rect.y}px`;
+  bar.style.width = `${rect.w}px`;
   bar.style.setProperty("--bar", segmentColor(segment));
   bar.setAttribute("tabindex", "0");
   bar.setAttribute("aria-label", `${unit.name} - ${metaStatus(segment.statusId).label}`);
@@ -415,9 +460,16 @@ function renderSegment(unit, segment) {
   label.textContent = `${unit.name} - ${metaStatus(segment.statusId).label}`;
   bar.appendChild(label);
 
-  bar.addEventListener("click", () => openDrawer(unit.id, segment.id));
+  bar.addEventListener("click", event => {
+    event.stopPropagation();
+    showTooltip(event, unit, segment, { pin: true });
+  });
+  bar.addEventListener("dblclick", event => {
+    event.stopPropagation();
+    openDrawer(unit.id, segment.id);
+  });
   bar.addEventListener("mouseenter", event => showTooltip(event, unit, segment));
-  bar.addEventListener("mouseleave", hideTooltip);
+  bar.addEventListener("mouseleave", () => hideTooltip(false));
   bar.addEventListener("pointermove", moveTooltip);
   bar.addEventListener("keydown", event => {
     if (event.key === "Enter" || event.key === " ") {
@@ -489,43 +541,60 @@ window.__ucePlaceholder = function(name) {
   return div;
 };
 
-function showTooltip(event, unit, activeSegment = null) {
+function showTooltip(event, unit, activeSegment = null, options = {}) {
+  const shouldPin = !!options.pin;
+  if (tooltipPinned && !shouldPin) return;
   const metaUnit = metaOwnerForUnit(unit);
   const activeId = metaUnit ? (activeSegment?.id || metaUnit.segments?.[0]?.id || null) : null;
   tooltipEl.innerHTML = tooltipHtml(unit, activeId);
   tooltipEl.classList.remove("hidden");
-  moveTooltip(event);
+  tooltipPinned = shouldPin;
+  tooltipEl.classList.toggle("pinned", tooltipPinned);
+  moveTooltip(event, true);
 }
 
-function moveTooltip(event) {
-  if (tooltipEl.classList.contains("hidden")) return;
-  const pad = 14;
+function moveTooltip(event, force = false) {
+  if (!tooltipEl || tooltipEl.classList.contains("hidden") || (tooltipPinned && !force)) return;
+  const margin = 12;
+  const offset = 16;
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  tooltipEl.style.maxWidth = `${Math.max(180, Math.min(360, viewportWidth - margin * 2))}px`;
   const rect = tooltipEl.getBoundingClientRect();
-  let x = event.clientX + 16;
-  let y = event.clientY + 16;
-  if (x + rect.width > window.innerWidth - pad) x = event.clientX - rect.width - 16;
-  if (y + rect.height > window.innerHeight - pad) y = window.innerHeight - rect.height - pad;
-  if (x < pad) x = pad;
-  if (y < pad) y = pad;
-  tooltipEl.style.left = `${x}px`;
-  tooltipEl.style.top = `${y}px`;
+  const maxLeft = Math.max(margin, viewportWidth - rect.width - margin);
+  const maxTop = Math.max(margin, viewportHeight - rect.height - margin);
+  let x = Number(event?.clientX);
+  let y = Number(event?.clientY);
+  if (!Number.isFinite(x)) x = viewportWidth / 2;
+  if (!Number.isFinite(y)) y = viewportHeight / 2;
+  let left = x + offset;
+  let top = y + offset;
+  if (left + rect.width + margin > viewportWidth) left = x - rect.width - offset;
+  if (top + rect.height + margin > viewportHeight) top = y - rect.height - offset;
+  left = Math.min(Math.max(left, margin), maxLeft);
+  top = Math.min(Math.max(top, margin), maxTop);
+  tooltipEl.style.left = `${Math.round(left)}px`;
+  tooltipEl.style.top = `${Math.round(top)}px`;
 }
 
-function hideTooltip() {
-  tooltipEl.classList.add("hidden");
+function hideTooltip(force = false) {
+  if (tooltipPinned && !force) return;
+  tooltipPinned = false;
+  tooltipEl?.classList.add("hidden");
+  tooltipEl?.classList.remove("pinned");
 }
 
 function tooltipHtml(unit, activeSegmentId = null) {
   const pairedMs = isPilot(unit) ? pairedMsForPilot(unit) : null;
   const metaUnit = metaOwnerForUnit(unit);
   const title = pairedMs ? `${unit.name} (${pairedMs.name})` : unit.name;
-  const tagHtml = unit.tags.length ? `<div class="drawer-tags tooltip-tags">${unit.tags.map(tag => `<span class="tag ${tagClass(tag)}">${escapeHtml(tag)}</span>`).join("")}</div>` : "";
-  const mustP5Html = hasMustP5(unit) ? `<div class="tooltip-must-p5">Must P5</div>` : "";
+  const tagHtml = unit.tags.length
+    ? `<div class="drawer-tags tooltip-tags">${unit.tags.map(tag => `<span class="tooltip-tag ${tagClass(tag)}">${escapeHtml(tag)}</span>`).join("")}</div>`
+    : "";
   const segmentsHtml = metaUnit ? segmentListHtml(metaUnit, activeSegmentId) : `<div class="segment-chip"><i class="segment-dot"></i><span>No same-week MS meta segments</span></div>`;
   return `
     <h3>${escapeHtml(title)}</h3>
     <div class="tooltip-subline">${escapeHtml(unitRowLabel(unit))} · ${escapeHtml(formatWeek(unit.week))}</div>
-    ${mustP5Html}
     ${tagHtml}
     <div class="segment-list">${segmentsHtml}</div>
     ${unit.note ? `<div class="note">${escapeHtml(unit.note)}</div>` : ""}
@@ -549,7 +618,7 @@ function addDiv(className, style = {}) {
 }
 
 function setZoom(value) {
-  zoomScale = clamp(Math.round(Number(value || 1) * 100) / 100, 0.35, 1.65);
+  zoomScale = clamp(Math.round(Number(value || 1) * 100) / 100, MIN_ZOOM, MAX_ZOOM);
   applyZoom();
 }
 
@@ -568,12 +637,12 @@ function applyZoom() {
 }
 
 function fitToWidth() {
-  const available = Math.max(320, els.chartScroll.clientWidth - 28);
+  const available = Math.max(240, els.chartScroll.clientWidth - 20);
   const scale = available / baseChartWidth();
-  setZoom(clamp(scale, 0.35, 1.2));
+  setZoom(clamp(scale, MIN_ZOOM, 1.2));
 }
 
-function baseChartWidth() { return LEFT_W + weekCount() * CELL_W; }
+function baseChartWidth() { return weekBoundaryX(weekCount()); }
 function baseChartHeight() { return HEADER_H + getTiers().reduce((sum, t) => sum + tierHeight(t.id), 0); }
 function normalizeMonthWeekCount(value) { return Number(value) === 5 ? 5 : 4; }
 function getMonthWeeks() {
@@ -603,7 +672,82 @@ function tierIndex(id) { return Math.max(0, getTiers().findIndex(t => t.id === i
 function metaStatus(id) { return getStatuses().find(s => s.id === id) || getStatuses()[2] || DEFAULT_META_STATUSES[2]; }
 function defaultMetaStatusId() { return getStatuses()[2]?.id || getStatuses()[0]?.id || "s3"; }
 function segmentColor(segment) { return metaStatus(segment.statusId).color; }
-function weekX(week) { return LEFT_W + (week - 1) * CELL_W; }
+function weekNeedsWideColumn(week) {
+  const targetWeek = normalizeWeek(week);
+  const slots = new Map();
+  for (const unit of state.units || []) {
+    if (normalizeWeek(unit.week) !== targetWeek || !normalizeRowOffset(unit.rowOffset)) continue;
+    const key = rowSlotKey(unit);
+    if (!key.startsWith("between:")) continue;
+    const entry = slots.get(key) || { ms: false, pilot: false };
+    if (isMs(unit)) entry.ms = true;
+    if (isPilot(unit)) entry.pilot = true;
+    slots.set(key, entry);
+    if (entry.ms && entry.pilot) return true;
+  }
+  return false;
+}
+function weekWidth(week) { return weekNeedsWideColumn(week) ? WIDE_CELL_W : CELL_W; }
+function weekBoundaryX(completedWeeks) {
+  let x = LEFT_W;
+  const count = clamp(Math.round(Number(completedWeeks) || 0), 0, weekCount());
+  for (let w = 1; w <= count; w++) x += weekWidth(w);
+  return x;
+}
+function weekSpanWidth(start, end) {
+  const first = Math.min(normalizeWeek(start), normalizeWeek(end));
+  const last = Math.max(normalizeWeek(start), normalizeWeek(end));
+  let width = 0;
+  for (let w = first; w <= last; w++) width += weekWidth(w);
+  return width;
+}
+function monthPixelWidth(index) {
+  const counts = getMonthWeeks();
+  const start = monthStartWeek(index);
+  let width = 0;
+  for (let offset = 0; offset < (counts[index] || 0); offset++) width += weekWidth(start + offset);
+  return width;
+}
+function sortedVisibleSegments(unit) {
+  return (unit?.segments || []).filter(Boolean).slice().sort((a, b) => normalizeWeek(a.start) - normalizeWeek(b.start) || normalizeWeek(a.end) - normalizeWeek(b.end));
+}
+function hasVisibleMetaSegments(unit) { return hasMetaBars(unit) && Array.isArray(unit?.segments) && unit.segments.length > 0; }
+function segmentBarRect(unit, segment) {
+  const start = Math.min(normalizeWeek(segment.start), normalizeWeek(segment.end));
+  const end = Math.max(normalizeWeek(segment.start), normalizeWeek(segment.end));
+  return { x: weekX(start) + 12, y: laneY(unit), w: Math.max(4, weekSpanWidth(start, end) - 24), h: BAR_H };
+}
+function metaSegmentLinks(unit) {
+  const segments = sortedVisibleSegments(unit);
+  const links = [];
+  for (let i = 1; i < segments.length; i++) {
+    const previous = segmentBarRect(unit, segments[i - 1]);
+    const next = segmentBarRect(unit, segments[i]);
+    const x = previous.x + previous.w - META_LINK_OVERLAP;
+    const w = next.x - x + META_LINK_OVERLAP;
+    if (w <= META_LINK_OVERLAP * 2) continue;
+    links.push({ x, y: previous.y + (BAR_H - META_LINK_H) / 2, w, fromColor: segmentColor(segments[i - 1]), toColor: segmentColor(segments[i]) });
+  }
+  return links;
+}
+function renderMetaSegmentLinks(unit) {
+  metaSegmentLinks(unit).forEach(link => {
+    const connector = addDiv("meta-link", {
+      left: `${link.x}px`,
+      top: `${link.y}px`,
+      width: `${link.w}px`
+    });
+    connector.style.setProperty("--link-from", link.fromColor);
+    connector.style.setProperty("--link-to", link.toColor);
+  });
+}
+
+function weekX(week) {
+  let x = LEFT_W;
+  const target = clamp(Math.round(Number(week) || 1), 1, weekCount());
+  for (let w = 1; w < target; w++) x += weekWidth(w);
+  return x;
+}
 function tierY(tierId) {
   let y = HEADER_H;
   for (const tier of getTiers()) {
@@ -622,7 +766,7 @@ function tierHeight(tierId) {
 function visibleLaneCount(tierId) {
   let maxLane = 0;
   for (const unit of state.units || []) {
-    if (unit.tier === tierId && hasMetaBars(unit)) maxLane = Math.max(maxLane, Number(unit.lane) || 0);
+    if (unit.tier === tierId && hasVisibleMetaSegments(unit)) maxLane = Math.max(maxLane, Number(unit.lane) || 0);
   }
   return maxLane;
 }
@@ -646,8 +790,10 @@ function maxIconStackVisualHeight(tierId) {
 }
 function iconX(unit) {
   const slot = sameSlotOffset(unit);
-  const size = slot.size || ICON_W;
-  return clamp(weekX(unit.week) + Math.round((CELL_W - ICON_W) / 2) + slot.x, LEFT_W, baseChartWidth() - size);
+  const groupWidth = slot.groupWidth || ICON_W;
+  const maxGroupLeft = Math.max(LEFT_W, baseChartWidth() - groupWidth);
+  const groupLeft = clamp(weekX(unit.week) + Math.round((weekWidth(unit.week) - groupWidth) / 2), LEFT_W, maxGroupLeft);
+  return groupLeft + slot.x;
 }
 function iconY(unit) {
   const slot = sameSlotOffset(unit);
@@ -688,6 +834,7 @@ function isMs(unit) { return String(unit?.kind || "").toLowerCase() === "ms"; }
 function hasMetaBars(unit) { return !isPilot(unit); }
 function hasTag(unit, tag) { return !!unit?.tags?.some(t => t.toLowerCase() === tag.toLowerCase()); }
 function hasMustP5(unit) { return hasTag(unit, MUST_P5_TAG); }
+function hasBuff(unit) { return hasTag(unit, BUFF_TAG); }
 function rowSlotKey(unit) {
   if (!unit) return "row:";
   const offset = normalizeRowOffset(unit.rowOffset);
@@ -723,25 +870,45 @@ function isCompactBetweenSlot(group) {
     && group.some(isMs)
     && group.some(isPilot);
 }
-function slotSizeForUnit(unit, group = sameSlotGroup(unit)) { return isCompactBetweenSlot(group) && isPilot(unit) ? COMPACT_PILOT_W : ICON_W; }
+function slotSizeForUnit() { return ICON_W; }
 function slotLayoutForGroup(group) {
   const compact = isCompactBetweenSlot(group);
-  let y = 0;
   const layout = new Map();
+  if (compact) {
+    const leftColumn = group.filter(unit => !isPilot(unit));
+    const rightColumn = group.filter(isPilot);
+    const rightX = ICON_W + BETWEEN_PAIR_GAP;
+    const leftHeight = leftColumn.length ? leftColumn.length * ICON_W + (leftColumn.length - 1) * ICON_STACK_GAP : 0;
+    const rightHeight = rightColumn.length ? rightColumn.length * ICON_W + (rightColumn.length - 1) * ICON_STACK_GAP : 0;
+    const groupHeight = Math.max(ICON_W, leftHeight, rightHeight);
+    let leftY = Math.max(0, Math.round((groupHeight - leftHeight) / 2));
+    let rightY = Math.max(0, Math.round((groupHeight - rightHeight) / 2));
+    leftColumn.forEach((unit, index) => {
+      layout.set(unit.id, { x: 0, y: leftY, size: ICON_W, z: group.length - index, index });
+      leftY += ICON_W + ICON_STACK_GAP;
+    });
+    rightColumn.forEach((unit, index) => {
+      const groupIndex = group.indexOf(unit);
+      layout.set(unit.id, { x: rightX, y: rightY, size: ICON_W, z: group.length - groupIndex, index: groupIndex });
+      rightY += ICON_W + ICON_STACK_GAP;
+    });
+    return { layout, groupHeight, groupWidth: ICON_W + BETWEEN_PAIR_GAP + ICON_W, compact };
+  }
+
+  let y = 0;
   group.forEach((unit, index) => {
     const size = slotSizeForUnit(unit, group);
-    const x = compact && size < ICON_W ? Math.round((ICON_W - size) / 2) : 0;
-    layout.set(unit.id, { x, y, size, z: group.length - index, index });
-    y += size + (compact ? COMPACT_STACK_GAP : ICON_STACK_GAP);
+    layout.set(unit.id, { x: 0, y, size, z: group.length - index, index });
+    y += size + ICON_STACK_GAP;
   });
-  return { layout, groupHeight: Math.max(ICON_W, y - (compact ? COMPACT_STACK_GAP : ICON_STACK_GAP)), compact };
+  return { layout, groupHeight: Math.max(ICON_W, y - ICON_STACK_GAP), groupWidth: ICON_W, compact };
 }
 function sameSlotOffset(unit) {
   const group = sameSlotGroup(unit);
-  if (group.length <= 1) return { x: 0, y: 0, z: 0, index: 0, count: 1, groupHeight: ICON_W, size: ICON_W, compact: false };
-  const { layout, groupHeight, compact } = slotLayoutForGroup(group);
+  if (group.length <= 1) return { x: 0, y: 0, z: 0, index: 0, count: 1, groupHeight: ICON_W, groupWidth: ICON_W, size: ICON_W, compact: false };
+  const { layout, groupHeight, groupWidth, compact } = slotLayoutForGroup(group);
   const slot = layout.get(unit.id) || { x: 0, y: 0, z: 0, index: 0, size: ICON_W };
-  return { ...slot, count: group.length, groupHeight, compact };
+  return { ...slot, count: group.length, groupHeight, groupWidth, compact };
 }
 function slotGroupHeight(group) { return slotLayoutForGroup(group).groupHeight || ICON_W; }
 function unitZIndex(unit, slot = sameSlotOffset(unit)) {
@@ -815,7 +982,7 @@ function maxUsedWeek(units = []) {
 }
 function reflowLanes(tierId) {
   state.units
-    .filter(unit => unit.tier === tierId && hasMetaBars(unit))
+    .filter(unit => unit.tier === tierId && hasVisibleMetaSegments(unit))
     .sort((a, b) => normalizeWeek(a.week) - normalizeWeek(b.week) || normalizeRowOffset(a.rowOffset) - normalizeRowOffset(b.rowOffset) || a.name.localeCompare(b.name))
     .forEach((unit, index) => { unit.lane = index + 1; });
 }
@@ -849,12 +1016,13 @@ function cleanTags(tags) {
     const ai = TAG_ORDER.has(a.toLowerCase()) ? TAG_ORDER.get(a.toLowerCase()) : 100 + a.toLowerCase().charCodeAt(0);
     const bi = TAG_ORDER.has(b.toLowerCase()) ? TAG_ORDER.get(b.toLowerCase()) : 100 + b.toLowerCase().charCodeAt(0);
     return ai === bi ? a.localeCompare(b) : ai - bi;
-  }).slice(0, 8);
+  }).slice(0, MAX_TAGS);
 }
 function tagClass(tag) {
   const t = String(tag || "").toLowerCase();
   if (t === "pvp") return "pvp";
   if (t === "pve") return "pve";
+  if (t === "buff") return "buff";
   if (t === "must p5" || t === "must-p5") return "must-p5";
   if (t === "core") return "core";
   if (t === "tech") return "tech";
@@ -876,12 +1044,12 @@ function initials(name) {
   return parts.slice(0, 2).map(p => p[0]).join("").toUpperCase();
 }
 function legibleTextScale(scale = zoomScale) {
-  const normalized = clamp(Number(scale) || 1, 0.5, 1.6);
-  return clamp(Math.pow(1 / normalized, 0.45), 1, 1.42);
+  const normalized = clamp(Number(scale) || 1, MIN_ZOOM, MAX_ZOOM);
+  return clamp(Math.pow(1 / normalized, 0.65), 1, 3);
 }
 function barLabelTextScale(scale = zoomScale) {
-  const normalized = clamp(Number(scale) || 1, 0.5, 1.6);
-  return clamp(Math.pow(1 / normalized, 0.85), 1, 1.82);
+  const normalized = clamp(Number(scale) || 1, MIN_ZOOM, MAX_ZOOM);
+  return clamp(Math.pow(1 / normalized, 0.9), 1, 3.4);
 }
 function setMessage(text) {
   if (!text) {
@@ -891,6 +1059,38 @@ function setMessage(text) {
     els.message.textContent = text;
     els.message.classList.remove("hidden");
   }
+}
+
+function beginPan(event) {
+  if (event.button !== 0 || event.pointerType === "touch") return;
+  if (event.target.closest?.(".unit-card, .meta-bar, .month-head, .week-head, .tier-label, .viewer-controls, button, a, input, select, textarea")) return;
+  panDrag = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    scrollLeft: els.chartScroll.scrollLeft,
+    scrollTop: els.chartScroll.scrollTop,
+    moved: false
+  };
+  els.chartScroll.classList.add("panning");
+  try { els.roadmap.setPointerCapture(event.pointerId); } catch {}
+}
+function movePan(event) {
+  if (!panDrag || event.pointerId !== panDrag.pointerId) return;
+  const dx = event.clientX - panDrag.startX;
+  const dy = event.clientY - panDrag.startY;
+  if (!panDrag.moved && Math.hypot(dx, dy) > 4) panDrag.moved = true;
+  if (!panDrag.moved) return;
+  els.chartScroll.scrollLeft = panDrag.scrollLeft - dx;
+  els.chartScroll.scrollTop = panDrag.scrollTop - dy;
+  event.preventDefault();
+}
+function endPan(event) {
+  if (!panDrag || event.pointerId !== panDrag.pointerId) return;
+  suppressRoadmapClick = panDrag.moved;
+  panDrag = null;
+  els.chartScroll.classList.remove("panning");
+  if (suppressRoadmapClick) setTimeout(() => { suppressRoadmapClick = false; }, 0);
 }
 function sanitizeText(text) { return String(text || "").replace(/\s+/g, " ").trim(); }
 function validHex(value) { return /^#[0-9a-f]{6}$/i.test(String(value || "")); }
