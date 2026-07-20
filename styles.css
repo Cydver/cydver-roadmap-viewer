@@ -460,6 +460,11 @@ h1 {
   color: #cfdae9;
   margin-bottom: 6px;
 }
+.app-tooltip-description {
+  color: #d4deeb;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
 .tooltip-must-p5 {
   display: inline-block;
   margin: 2px 0 6px;

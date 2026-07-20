@@ -7,11 +7,11 @@ const DEFAULT_TIERS = [
   { id: "skip", label: "Skip", color: "#8d96a6" }
 ];
 const DEFAULT_META_STATUSES = [
-  { id: "s1", label: "Human Rights", color: "#ff4b59" },
-  { id: "s2", label: "Era-Defining", color: "#47a9ff" },
-  { id: "s3", label: "Strong", color: "#67ef87" },
-  { id: "s4", label: "Rotational", color: "#ffcc4d" },
-  { id: "s5", label: "Situational", color: "#c18cff" }
+  { id: "s1", label: "Human Rights", description: "", color: "#ff4b59" },
+  { id: "s2", label: "Era-Defining", description: "", color: "#47a9ff" },
+  { id: "s3", label: "Strong", description: "", color: "#67ef87" },
+  { id: "s4", label: "Rotational", description: "", color: "#ffcc4d" },
+  { id: "s5", label: "Situational", description: "", color: "#c18cff" }
 ];
 const OLD_GENERIC_MONTHS = ["This Month", "Next Month", "2 Months Later", "3 Months Later", "4 Months Later"];
 const OLD_STATUS_MAP = { top: "s1", strong: "s3", niche: "s5", fading: "s4", custom: "s5" };
@@ -61,6 +61,8 @@ let zoomScale = 1;
 let activeUnitId = null;
 let tooltipEl = null;
 let tooltipPinned = false;
+let appTooltipEl = null;
+let appTooltipPinned = false;
 let panDrag = null;
 let suppressRoadmapClick = false;
 const touchPoints = new Map();
@@ -102,6 +104,7 @@ function bindControls() {
   });
   document.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
+    if (!event.target.closest?.(".legend-item")) hideAppTooltip(true);
     if (event.target.closest?.(".unit-card, .meta-bar, .unit-drawer, .viewer-controls, .topbar, .legend-panel, button, a, input, select, textarea")) return;
     hideTooltip(true);
   });
@@ -198,11 +201,11 @@ function normalizeState() {
   if (!Array.isArray(state.metaStatuses) || !state.metaStatuses.length) state.metaStatuses = structuredClone(DEFAULT_META_STATUSES);
   state.metaStatuses = state.metaStatuses.slice(0, 8).map((s, i) => {
     const id = sanitizeText(s.id) || `s${i + 1}`;
-    const fallback = DEFAULT_META_STATUSES[i] || { label: `Status ${i + 1}`, color: "#8aa0ff" };
+    const fallback = DEFAULT_META_STATUSES[i] || { label: `Status ${i + 1}`, description: "", color: "#8aa0ff" };
     const color = validHex(s.color) && String(s.color).toLowerCase() !== (LEGACY_STATUS_COLORS[id] || "").toLowerCase()
       ? s.color
       : fallback.color;
-    return { id, label: sanitizeText(s.label) || fallback.label, color };
+    return { id, label: sanitizeText(s.label) || fallback.label, description: String(s.description ?? fallback.description ?? "").trim(), color };
   });
 
   const tierIdsSet = new Set(state.tiers.map(t => t.id));
@@ -302,6 +305,9 @@ function renderLegend() {
     const item = document.createElement("span");
     item.className = "legend-item";
     item.innerHTML = `<i class="legend-dot" style="background:${escapeAttr(status.color)}"></i>${escapeHtml(status.label)}`;
+    const description = String(status.description || "").trim();
+    item.setAttribute("aria-label", description ? `${status.label}: ${description}` : status.label);
+    bindAppTooltip(item, () => `<h3>${escapeHtml(status.label)}</h3>${description ? `<div class="app-tooltip-description">${multilineHtml(description)}</div>` : ""}`);
     els.legend.appendChild(item);
   });
 }
@@ -556,6 +562,64 @@ window.__ucePlaceholder = function(name) {
   div.textContent = initials(name);
   return div;
 };
+
+function bindAppTooltip(element, htmlFactory) {
+  if (!element) return;
+  element.addEventListener("pointerenter", (event) => {
+    if (event.pointerType === "touch") return;
+    showAppTooltip(event, htmlFactory, false);
+  });
+  element.addEventListener("pointermove", (event) => {
+    if (event.pointerType === "touch" || appTooltipPinned) return;
+    if (!appTooltipEl) showAppTooltip(event, htmlFactory, false);
+    else positionAppTooltip(appTooltipEl, event);
+  });
+  element.addEventListener("pointerleave", () => { if (!appTooltipPinned) hideAppTooltip(); });
+  element.addEventListener("click", (event) => {
+    if (window.matchMedia?.("(hover: hover) and (pointer: fine)")?.matches) return;
+    event.stopPropagation();
+    showAppTooltip(event, htmlFactory, true);
+  });
+}
+
+function showAppTooltip(event, htmlFactory, pin = false) {
+  hideAppTooltip(true);
+  const html = typeof htmlFactory === "function" ? htmlFactory() : String(htmlFactory || "");
+  if (!html) return;
+  appTooltipEl = document.createElement("div");
+  appTooltipEl.className = "tooltip app-tooltip";
+  appTooltipEl.innerHTML = html;
+  document.body.appendChild(appTooltipEl);
+  appTooltipPinned = !!pin;
+  positionAppTooltip(appTooltipEl, event);
+}
+
+function positionAppTooltip(element, event) {
+  if (!element || !event) return;
+  const margin = 12;
+  const offset = 16;
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  element.style.maxWidth = `${Math.max(180, Math.min(360, viewportWidth - margin * 2))}px`;
+  const rect = element.getBoundingClientRect();
+  const clientX = Number.isFinite(event.clientX) ? event.clientX : viewportWidth / 2;
+  const clientY = Number.isFinite(event.clientY) ? event.clientY : viewportHeight / 2;
+  let left = clientX + offset;
+  let top = clientY + offset;
+  if (left + rect.width + margin > viewportWidth) left = clientX - rect.width - offset;
+  if (top + rect.height + margin > viewportHeight) top = clientY - rect.height - offset;
+  left = Math.min(Math.max(left, margin), Math.max(margin, viewportWidth - rect.width - margin));
+  top = Math.min(Math.max(top, margin), Math.max(margin, viewportHeight - rect.height - margin));
+  element.style.left = `${Math.round(left)}px`;
+  element.style.top = `${Math.round(top)}px`;
+}
+
+function hideAppTooltip(force = false) {
+  if (appTooltipPinned && !force) return;
+  appTooltipEl?.remove();
+  appTooltipEl = null;
+  appTooltipPinned = false;
+}
 
 function showTooltip(event, unit, activeSegment = null, options = {}) {
   const shouldPin = !!options.pin;
