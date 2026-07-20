@@ -52,6 +52,7 @@ const DEFAULT_STATE = {
   monthWeeks: DEFAULT_MONTHS.map(() => 4),
   tiers: structuredClone(DEFAULT_TIERS),
   metaStatuses: structuredClone(DEFAULT_META_STATUSES),
+  tagDescriptions: {},
   units: []
 };
 
@@ -226,6 +227,8 @@ function normalizeState() {
       : fallback.color;
     return { id, label: sanitizeText(s.label) || fallback.label, description: String(s.description ?? fallback.description ?? "").trim(), color };
   });
+
+  state.tagDescriptions = normalizeTagDescriptions(state.tagDescriptions);
 
   const tierIdsSet = new Set(state.tiers.map(t => t.id));
   const statusIds = new Set(state.metaStatuses.map(s => s.id));
@@ -687,7 +690,19 @@ function hideAppTooltip(force = false) {
 
 function profileTagsHtml(unit) {
   if (!unit?.tags?.length) return "";
-  return `<div class="unit-profile-tags">${unit.tags.map(tag => `<span class="unit-profile-tag ${tagClass(tag)}">${escapeHtml(tag)}</span>`).join("")}</div>`;
+  return `<div class="unit-profile-tags">${unit.tags.map(tag => {
+    const description = tagDescription(tag);
+    return `<span class="unit-profile-tag ${tagClass(tag)}${description ? " has-description" : ""}" data-profile-tag="${escapeAttr(tag)}"${description ? ` aria-label="${escapeAttr(`${tag}: ${description}`)}"` : ""}>${escapeHtml(tag)}</span>`;
+  }).join("")}</div>`;
+}
+
+function bindProfileTagTooltips(root) {
+  root?.querySelectorAll(".unit-profile-tag[data-profile-tag]").forEach(chip => {
+    const tag = chip.dataset.profileTag || "";
+    const description = tagDescription(tag);
+    if (!description) return;
+    bindAppTooltip(chip, () => `<h3>${escapeHtml(tag)}</h3><div class="app-tooltip-description">${multilineHtml(description)}</div>`);
+  });
 }
 
 function profileArtHtml(unit, typeLabel) {
@@ -712,7 +727,7 @@ function profileInvestmentHtml(unit) {
   const cells = [];
   if (minimum != null) cells.push(`<div class="unit-profile-investment-stat"><span>Minimum</span><strong>P${minimum}</strong></div>`);
   if (ideal != null) cells.push(`<div class="unit-profile-investment-stat"><span>Ideal</span><strong>P${ideal}</strong></div>`);
-  return `<section class="unit-profile-section"><div class="unit-profile-section-title">Investment</div><div class="unit-profile-investment">${cells.join("")}</div></section>`;
+  return `<section class="unit-profile-section unit-profile-investment-section"><div class="unit-profile-section-title">Investment</div><div class="unit-profile-investment">${cells.join("")}</div></section>`;
 }
 
 function profileMetaHtml(unit, activeSegmentId = null) {
@@ -724,21 +739,12 @@ function profileMetaHtml(unit, activeSegmentId = null) {
     const description = String(status.description || "").trim();
     return `<div class="unit-profile-meta-row${activeSegmentId === seg.id ? " active" : ""}"><i style="background:${escapeAttr(status.color)}"></i><div class="unit-profile-meta-copy"><div class="unit-profile-meta-top"><strong>${escapeHtml(status.label)}</strong><span>${escapeHtml(formatWeekRange(seg.start, seg.end))}</span></div>${description ? `<p>${multilineHtml(description)}</p>` : ""}</div></div>`;
   }).join("");
-  return `<section class="unit-profile-section"><div class="unit-profile-section-title">PVP Meta</div><div class="unit-profile-meta-list">${rows}</div></section>`;
+  return `<section class="unit-profile-section unit-profile-meta-section"><div class="unit-profile-section-title">PVP Meta</div><div class="unit-profile-meta-list">${rows}</div></section>`;
 }
 
-function profileMsNotesHtml(unit) {
-  if (!unit) return "";
-  const blocks = [];
-  if (unit.notesPvp) blocks.push(`<div class="unit-profile-note"><span>PVP</span><div>${multilineHtml(unit.notesPvp)}</div></div>`);
-  if (unit.notesPve) blocks.push(`<div class="unit-profile-note"><span>PVE</span><div>${multilineHtml(unit.notesPve)}</div></div>`);
-  return blocks.length ? `<section class="unit-profile-section"><div class="unit-profile-section-title">Notes</div><div class="unit-profile-notes">${blocks.join("")}</div></section>` : "";
-}
-
-function profilePilotNotesHtml(unit) {
-  if (!unit) return "";
-  const notes = [unit.notesPvp, unit.notesPve].filter(Boolean).join("\n\n");
-  return notes ? `<section class="unit-profile-section"><div class="unit-profile-section-title">Notes</div><div class="unit-profile-pilot-note">${multilineHtml(notes)}</div></section>` : "";
+function profileScrollableNotesHtml(title, text, emptyText, extraClass = "") {
+  const content = String(text || "").trim();
+  return `<section class="unit-profile-section unit-profile-scroll-notes ${extraClass}"><div class="unit-profile-section-title">${escapeHtml(title)}</div><div class="unit-profile-note-scroll">${content ? `<div class="unit-profile-note-copy">${multilineHtml(content)}</div>` : `<div class="unit-profile-note-empty">${escapeHtml(emptyText)}</div>`}</div></section>`;
 }
 
 function profilePanelHeaderHtml(unit, label, emptyMessage) {
@@ -755,7 +761,7 @@ function openUnitProfile(unitId, activeSegmentId = null) {
   hideAppTooltip(true);
   closeDrawer();
   closeDiamondPlanner();
-  closeUnitProfile();
+  closeUnitProfile(true);
 
   const ms = isMs(clicked) ? clicked : pairedMsForPilot(clicked);
   const pilot = isPilot(clicked) ? clicked : pairedPilotForMs(clicked);
@@ -772,11 +778,16 @@ function openUnitProfile(unitId, activeSegmentId = null) {
           ${profilePanelHeaderHtml(ms, "MOBILE SUIT", "No paired MS")}
           ${ms ? profileInvestmentHtml(ms) : ""}
           ${ms ? profileMetaHtml(ms, activeId) : ""}
-          ${ms ? profileMsNotesHtml(ms) : ""}
+          ${ms ? profileScrollableNotesHtml("PVP Notes", ms.notesPvp, "No PVP notes added.", "unit-profile-pvp-notes") : ""}
         </section>
         <section class="unit-profile-panel unit-profile-pilot-panel">
-          ${profilePanelHeaderHtml(pilot, "PILOT", "No paired pilot")}
-          ${pilot ? profilePilotNotesHtml(pilot) : ""}
+          <div class="unit-profile-pilot-primary">
+            ${profilePanelHeaderHtml(pilot, "PILOT", "No paired pilot")}
+            ${pilot ? profileScrollableNotesHtml("Pilot Notes", [pilot.notesPvp, pilot.notesPve].filter(Boolean).join("\n\n"), "No pilot notes added.", "unit-profile-pilot-notes") : ""}
+          </div>
+          <div class="unit-profile-pve-slot">
+            ${ms ? profileScrollableNotesHtml("MS PVE Notes", ms.notesPve, "No PVE notes added.", "unit-profile-pve-notes") : `<div class="unit-profile-note-empty standalone">No paired MS PVE notes.</div>`}
+          </div>
         </section>
       </div>
     </article>`;
@@ -793,17 +804,41 @@ function openUnitProfile(unitId, activeSegmentId = null) {
   document.body.appendChild(overlay);
   document.body.classList.add("unit-profile-open");
   unitProfileOverlay = overlay;
+  bindProfileTagTooltips(overlay);
   overlay.querySelector(".unit-profile-close")?.focus({ preventScroll: true });
 }
 
-function closeUnitProfile() {
+function closeUnitProfile(immediate = false) {
   if (!unitProfileOverlay) return;
   const overlay = unitProfileOverlay;
+  if (overlay.classList.contains("closing") && !immediate) return;
+  const returnFocus = profileReturnFocus;
   unitProfileOverlay = null;
-  overlay.remove();
-  document.body.classList.remove("unit-profile-open");
-  if (profileReturnFocus?.isConnected) profileReturnFocus.focus({ preventScroll: true });
   profileReturnFocus = null;
+  hideAppTooltip(true);
+
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    overlay.remove();
+    if (!document.querySelector(".unit-profile-overlay")) document.body.classList.remove("unit-profile-open");
+    if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
+  };
+
+  if (immediate || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
+    finish();
+    return;
+  }
+
+  overlay.classList.add("closing");
+  const onAnimationEnd = (event) => {
+    if (event.target !== overlay) return;
+    overlay.removeEventListener("animationend", onAnimationEnd);
+    finish();
+  };
+  overlay.addEventListener("animationend", onAnimationEnd);
+  setTimeout(finish, 260);
 }
 
 function showTooltip(event, unit, activeSegment = null, options = {}) {
@@ -1383,6 +1418,24 @@ function cleanTags(tags) {
     return ai === bi ? a.localeCompare(b) : ai - bi;
   }).slice(0, MAX_TAGS);
 }
+function normalizeTagDescriptions(input) {
+  const normalized = {};
+  if (!input || typeof input !== "object" || Array.isArray(input)) return normalized;
+  for (const [rawTag, rawDescription] of Object.entries(input)) {
+    const cleanTag = sanitizeText(rawTag);
+    const description = String(rawDescription || "").trim();
+    if (!cleanTag || !description) continue;
+    const canonical = TAG_OPTIONS.find(tag => tag.toLowerCase() === cleanTag.toLowerCase()) || cleanTag;
+    normalized[canonical] = description;
+  }
+  return normalized;
+}
+function tagDescription(tag) {
+  const key = String(tag || "").toLowerCase();
+  const match = Object.entries(state.tagDescriptions || {}).find(([name]) => name.toLowerCase() === key);
+  return match ? String(match[1] || "").trim() : "";
+}
+
 function tagClass(tag) {
   const t = String(tag || "").toLowerCase();
   if (t === "pvp") return "pvp";
