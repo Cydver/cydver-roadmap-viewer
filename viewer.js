@@ -334,7 +334,7 @@ function renderLegend() {
   getStatuses().forEach(status => {
     const item = document.createElement("span");
     item.className = "legend-item";
-    item.innerHTML = `<i class="legend-dot" style="background:${escapeAttr(status.color)}"></i>${escapeHtml(status.label)}`;
+    item.innerHTML = `<i class="legend-swatch" style="--legend-color:${escapeAttr(status.color)}"></i>${escapeHtml(status.label)}`;
     const description = String(status.description || "").trim();
     item.setAttribute("aria-label", description ? `${status.label}: ${description}` : status.label);
     bindAppTooltip(item, () => `<h3>${escapeHtml(status.label)}</h3>${description ? `<div class="app-tooltip-description">${multilineHtml(description)}</div>` : ""}`);
@@ -372,6 +372,13 @@ function renderChart() {
       color: tier.color
     });
     label.textContent = tier.label;
+
+    const rail = addDiv("tier-accent-rail", {
+      left: `${LEFT_W}px`,
+      top: `${tierY(tier.id)}px`,
+      width: `${Math.max(0, width - LEFT_W)}px`
+    });
+    rail.style.setProperty("--tier-color", tier.color);
   });
 
   const monthBoundaries = new Set([0]);
@@ -624,7 +631,7 @@ function renderDiamondPlanner() {
     els.plannerList.appendChild(row);
   });
   const remaining = (diamondPlanner.balance || 0) - total;
-  els.plannerSummary.innerHTML = `<span>Planned <strong>${formatDiamonds(total)}</strong></span><span>Remaining <strong class="${remaining < 0 ? "negative" : ""}">${formatDiamonds(remaining)}</strong></span>`;
+  els.plannerSummary.innerHTML = `<div class="diamond-summary-stat"><span>Planned</span><strong>${formatDiamonds(total)}</strong></div><div class="diamond-summary-stat"><span>Remaining</span><strong class="${remaining < 0 ? "negative" : ""}">${formatDiamonds(remaining)}</strong></div>`;
 }
 
 window.__ucePlaceholder = function(name) {
