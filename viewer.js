@@ -95,6 +95,10 @@ let suppressRoadmapClick = false;
 const touchPoints = new Map();
 let touchPan = null;
 let pinchGesture = null;
+let touchGestureFrame = 0;
+let pendingTouchPanPoint = null;
+let pendingTouchPinchFrame = null;
+let touchZoomDirty = false;
 let suppressTouchClickUntil = 0;
 
 function createLayoutGeometryCache() {
@@ -1320,7 +1324,7 @@ function updateUnitProfileAdaptiveRows(root) {
   if (!grid) return;
 
   // Mobile uses one continuous stacked scroll surface; row sizing only applies to desktop.
-  if (window.matchMedia?.('(max-width: 820px)')?.matches) {
+  if (window.matchMedia?.('(max-width: 820px), (max-height: 600px) and (pointer: coarse)')?.matches) {
     grid.style.removeProperty('--profile-top-row');
     return;
   }
@@ -2792,9 +2796,56 @@ function touchPairGeometry() {
     distance: Math.max(1, Math.hypot(b.x - a.x, b.y - a.y))
   };
 }
+function scheduleTouchGestureFrame() {
+  if (touchGestureFrame) return;
+  touchGestureFrame = requestAnimationFrame(flushTouchGestureFrame);
+}
+function flushTouchGestureFrame() {
+  touchGestureFrame = 0;
+
+  if (pendingTouchPinchFrame && pinchGesture) {
+    const frame = pendingTouchPinchFrame;
+    pendingTouchPinchFrame = null;
+    pendingTouchPanPoint = null;
+    const nextZoom = clamp(Number(frame.zoom) || zoomScale, MIN_ZOOM, MAX_ZOOM);
+    zoomScale = nextZoom;
+    els.roadmap.style.transform = `scale(${zoomScale})`;
+    els.chartStage.style.width = `${pinchGesture.baseWidth * zoomScale}px`;
+    els.chartStage.style.height = `${pinchGesture.baseHeight * zoomScale}px`;
+    if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
+    const localX = frame.midpointX - pinchGesture.rectLeft;
+    const localY = frame.midpointY - pinchGesture.rectTop;
+    els.chartScroll.scrollLeft = pinchGesture.contentX * zoomScale - localX;
+    els.chartScroll.scrollTop = pinchGesture.contentY * zoomScale - localY;
+    touchZoomDirty = true;
+    return;
+  }
+
+  if (pendingTouchPanPoint && touchPan) {
+    const point = pendingTouchPanPoint;
+    pendingTouchPanPoint = null;
+    const dx = point.x - touchPan.startX;
+    const dy = point.y - touchPan.startY;
+    els.chartScroll.scrollLeft = touchPan.scrollLeft - dx;
+    els.chartScroll.scrollTop = touchPan.scrollTop - dy;
+  }
+}
+function flushPendingTouchGestureFrame() {
+  if (touchGestureFrame) {
+    cancelAnimationFrame(touchGestureFrame);
+    touchGestureFrame = 0;
+  }
+  flushTouchGestureFrame();
+}
+function commitTouchZoomPresentation() {
+  if (!touchZoomDirty) return;
+  touchZoomDirty = false;
+  applyZoom();
+}
 function beginPinchGesture() {
   const geometry = touchPairGeometry();
   if (!geometry) return;
+  flushPendingTouchGestureFrame();
   const rect = els.chartScroll.getBoundingClientRect();
   const localX = geometry.midpointX - rect.left;
   const localY = geometry.midpointY - rect.top;
@@ -2803,14 +2854,21 @@ function beginPinchGesture() {
     startZoom: zoomScale,
     contentX: (els.chartScroll.scrollLeft + localX) / zoomScale,
     contentY: (els.chartScroll.scrollTop + localY) / zoomScale,
+    rectLeft: rect.left,
+    rectTop: rect.top,
+    baseWidth: baseChartWidth(),
+    baseHeight: baseChartHeight(),
     moved: false
   };
+  pendingTouchPanPoint = null;
   touchPan = null;
+  els.chartScroll.classList.add("touch-gesturing");
 }
 function beginTouchGesture(event) {
   if (event.pointerType !== "touch") return;
   touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
   try { els.chartScroll.setPointerCapture(event.pointerId); } catch {}
+  els.chartScroll.classList.add("touch-gesturing");
   if (touchPoints.size >= 2) {
     beginPinchGesture();
     event.preventDefault();
@@ -2832,15 +2890,14 @@ function moveTouchGesture(event) {
   if (touchPoints.size >= 2 && pinchGesture) {
     const geometry = touchPairGeometry();
     if (!geometry) return;
-    const nextZoom = pinchGesture.startZoom * (geometry.distance / pinchGesture.startDistance);
-    const rect = els.chartScroll.getBoundingClientRect();
-    const localX = geometry.midpointX - rect.left;
-    const localY = geometry.midpointY - rect.top;
-    setZoom(nextZoom);
-    els.chartScroll.scrollLeft = pinchGesture.contentX * zoomScale - localX;
-    els.chartScroll.scrollTop = pinchGesture.contentY * zoomScale - localY;
+    pendingTouchPinchFrame = {
+      zoom: pinchGesture.startZoom * (geometry.distance / pinchGesture.startDistance),
+      midpointX: geometry.midpointX,
+      midpointY: geometry.midpointY
+    };
     pinchGesture.moved = true;
     suppressTouchClickUntil = performance.now() + 400;
+    scheduleTouchGestureFrame();
     event.preventDefault();
     return;
   }
@@ -2850,14 +2907,15 @@ function moveTouchGesture(event) {
   const dy = event.clientY - touchPan.startY;
   if (!touchPan.moved && Math.hypot(dx, dy) > 4) touchPan.moved = true;
   if (!touchPan.moved) return;
-  els.chartScroll.scrollLeft = touchPan.scrollLeft - dx;
-  els.chartScroll.scrollTop = touchPan.scrollTop - dy;
+  pendingTouchPanPoint = { x: event.clientX, y: event.clientY };
   suppressTouchClickUntil = performance.now() + 400;
+  scheduleTouchGestureFrame();
   event.preventDefault();
 }
 function endTouchGesture(event) {
   if (event.pointerType !== "touch" || !touchPoints.has(event.pointerId)) return;
-  const moved = Boolean(touchPan?.moved || pinchGesture?.moved);
+  flushPendingTouchGestureFrame();
+  const moved = Boolean(touchPan?.moved || pinchGesture?.moved || touchZoomDirty);
   touchPoints.delete(event.pointerId);
   try { els.chartScroll.releasePointerCapture(event.pointerId); } catch {}
   if (moved) suppressTouchClickUntil = performance.now() + 400;
@@ -2867,6 +2925,7 @@ function endTouchGesture(event) {
     return;
   }
   pinchGesture = null;
+  pendingTouchPinchFrame = null;
   if (touchPoints.size === 1) {
     const [pointerId, point] = touchPoints.entries().next().value;
     touchPan = {
@@ -2879,6 +2938,9 @@ function endTouchGesture(event) {
     };
   } else {
     touchPan = null;
+    pendingTouchPanPoint = null;
+    commitTouchZoomPresentation();
+    els.chartScroll.classList.remove("touch-gesturing");
   }
 }
 
