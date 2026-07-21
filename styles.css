@@ -2630,3 +2630,72 @@ body {
   box-shadow: 0 8px 20px rgba(0,0,0,.36), 0 0 0 1px rgba(99,211,255,.2), 0 0 15px rgba(99,211,255,.08), inset 0 1px 0 rgba(255,255,255,.18);
 }
 .meta-link.meta-filter-selected { opacity: .95; }
+
+/* --- Meta ownership guidance: quiet lanes + explicit card-to-timeline grouping. --- */
+.lane-track {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  overflow: visible;
+}
+.lane-track::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: calc(1px * var(--textBoost, 1));
+  transform: translateY(-50%);
+  background: rgba(190,218,231,.035);
+  opacity: .58;
+  transition: background .14s ease, opacity .14s ease, box-shadow .14s ease;
+}
+.lane-track.meta-owner-highlight::before {
+  background: rgba(125,220,255,.24);
+  opacity: 1;
+  box-shadow: 0 0 calc(5px * var(--textBoost, 1)) rgba(99,211,255,.1);
+}
+.meta-owner-tether {
+  position: absolute;
+  z-index: 6;
+  pointer-events: none;
+  background: rgba(133,211,238,.17);
+  opacity: .62;
+  transition: background .14s ease, opacity .14s ease, box-shadow .14s ease;
+}
+.meta-owner-tether.stem {
+  width: calc(1px * var(--textBoost, 1));
+  transform: translateX(-50%);
+}
+.meta-owner-tether.arm {
+  height: calc(1px * var(--textBoost, 1));
+  transform: translateY(-50%);
+}
+.meta-owner-tether.meta-owner-highlight {
+  background: rgba(148,229,255,.82);
+  opacity: 1;
+  box-shadow: 0 0 calc(5px * var(--textBoost, 1)) rgba(99,211,255,.32);
+}
+.meta-bar.meta-owner-highlight {
+  filter: saturate(1.1) brightness(1.07);
+  box-shadow: 0 8px 20px rgba(0,0,0,.36), 0 0 0 calc(1px * var(--textBoost, 1)) rgba(208,244,255,.42), 0 0 calc(8px * var(--textBoost, 1)) rgba(99,211,255,.17), inset 0 1px 0 rgba(255,255,255,.18);
+  z-index: 9;
+}
+.meta-link.meta-owner-highlight {
+  opacity: 1;
+  filter: saturate(1.08) brightness(1.06);
+  box-shadow: 0 0 0 calc(1px * var(--textBoost, 1)) rgba(208,244,255,.28), 0 0 calc(7px * var(--textBoost, 1)) rgba(99,211,255,.13);
+}
+.unit-card.meta-owner-highlight {
+  filter: brightness(1.07) saturate(1.03);
+  outline: calc(1.5px * var(--textBoost, 1)) solid rgba(210,245,255,.82);
+  outline-offset: calc(2px * var(--textBoost, 1));
+}
+.meta-owner-tether.meta-filter-muted { opacity: .08; }
+.meta-owner-tether.meta-filter-selected { opacity: .82; }
+.lane-track.meta-filter-muted::before { opacity: .08; }
+.lane-track.meta-filter-selected::before { opacity: .72; }
+.meta-owner-tether.meta-filter-muted.meta-owner-highlight,
+.meta-owner-tether.meta-filter-selected.meta-owner-highlight { opacity: 1; }
+.lane-track.meta-filter-muted.meta-owner-highlight::before,
+.lane-track.meta-filter-selected.meta-owner-highlight::before { opacity: 1; }

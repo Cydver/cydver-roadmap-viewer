@@ -72,6 +72,8 @@ let activeUnitId = null;
 const activeMetaStatusFilters = new Set();
 const activeMetaUnitFilters = new Set();
 const metaFilterClickTimers = new Map();
+let metaOwnerHoverId = null;
+let metaOwnerFocusId = null;
 let tooltipEl = null;
 let tooltipPinned = false;
 let unitProfileOverlay = null;
@@ -489,10 +491,13 @@ function renderChart() {
 
   getTiers().forEach(tier => {
     for (let lane = 1; lane <= visibleLaneCount(tier.id); lane++) {
-      addDiv("lane-track", {
+      const track = addDiv("lane-track", {
         top: `${laneY(tier.id, lane)}px`,
         width: `${Math.max(4, width - LEFT_W - 20)}px`
       });
+      const owner = state.units.find(unit => unit.tier === tier.id && hasVisibleMetaSegments(unit) && Number(unit.lane) === lane);
+      if (owner) track.dataset.unitId = owner.id;
+      track.setAttribute("aria-hidden", "true");
     }
   });
 
@@ -500,6 +505,7 @@ function renderChart() {
     .filter(hasVisibleMetaSegments)
     .sort((a, b) => laneY(a) - laneY(b) || normalizeWeek(a.week) - normalizeWeek(b.week) || a.name.localeCompare(b.name))
     .forEach(unit => {
+      renderMetaOwnerTether(unit);
       renderMetaSegmentLinks(unit);
       const segments = sortedVisibleSegments(unit);
       segments.forEach((segment, index) => renderSegment(unit, segment, index, segments.length));
@@ -570,10 +576,16 @@ function renderUnit(unit) {
   });
   card.addEventListener("mouseenter", event => {
     bringUnitToFront(unit.id);
+    setMetaOwnerHover(metaOwnerForUnit(unit)?.id || null);
     showTooltip(event, unit);
   });
-  card.addEventListener("mouseleave", () => hideTooltip(false));
+  card.addEventListener("mouseleave", () => {
+    setMetaOwnerHover(null);
+    hideTooltip(false);
+  });
   card.addEventListener("pointermove", moveTooltip);
+  card.addEventListener("focus", () => setMetaOwnerFocus(metaOwnerForUnit(unit)?.id || null));
+  card.addEventListener("blur", () => setMetaOwnerFocus(null));
   card.addEventListener("keydown", event => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
@@ -631,9 +643,17 @@ function renderSegment(unit, segment, index = 0, total = 1) {
     metaFilterClickTimers.delete(unit.id);
     openUnitProfile(unit.id, segment.id);
   });
-  bar.addEventListener("mouseenter", event => showTooltip(event, unit, segment));
-  bar.addEventListener("mouseleave", () => hideTooltip(false));
+  bar.addEventListener("mouseenter", event => {
+    setMetaOwnerHover(unit.id);
+    showTooltip(event, unit, segment);
+  });
+  bar.addEventListener("mouseleave", () => {
+    setMetaOwnerHover(null);
+    hideTooltip(false);
+  });
   bar.addEventListener("pointermove", moveTooltip);
+  bar.addEventListener("focus", () => setMetaOwnerFocus(unit.id));
+  bar.addEventListener("blur", () => setMetaOwnerFocus(null));
   bar.addEventListener("keydown", event => {
     if (event.key === "Enter") {
       event.preventDefault();
@@ -1621,6 +1641,109 @@ function renderMetaSegmentLinks(unit) {
     connector.style.setProperty("--link-to", link.toColor);
   });
 }
+function metaOwnerRouteX(unit, cardRect, cardEdgeY, laneCenter) {
+  const center = (cardRect.left + cardRect.right) / 2;
+  const peers = sameSlotGroup(unit).filter(hasVisibleMetaSegments);
+  const peerIndex = Math.max(0, peers.findIndex(peer => peer.id === unit.id));
+  const candidates = [];
+  if (peers.length <= 1) candidates.push(center);
+  const preferredSide = peerIndex % 2 ? "right" : "left";
+  const oppositeSide = preferredSide === "left" ? "right" : "left";
+  const baseLevel = Math.floor(peerIndex / 2) + 1;
+  const addSide = (side, offset) => candidates.push(side === "left" ? cardRect.left - offset : cardRect.right + offset);
+  for (let level = baseLevel; level <= baseLevel + 3; level++) {
+    const offset = 12 * level;
+    addSide(preferredSide, offset);
+    addSide(oppositeSide, offset);
+  }
+  if (peers.length > 1) candidates.push(center);
+  const top = Math.min(cardEdgeY, laneCenter);
+  const bottom = Math.max(cardEdgeY, laneCenter);
+  const isBlocked = (x) => state.units.some(other => {
+    if (other.id === unit.id) return false;
+    const rect = iconRect(other);
+    const crossesVertically = bottom > rect.top + 2 && top < rect.bottom - 2;
+    return crossesVertically && x > rect.left - 4 && x < rect.right + 4;
+  });
+  const minX = LEFT_W + 4;
+  const maxX = baseChartWidth() - 4;
+  return candidates.find(x => x >= minX && x <= maxX && !isBlocked(x)) ?? clamp(center, minX, maxX);
+}
+function metaOwnerTetherGeometry(unit) {
+  const firstSegment = sortedVisibleSegments(unit)[0];
+  if (!firstSegment) return null;
+  const slot = sameSlotOffset(unit);
+  const size = slot.size || ICON_W;
+  const cardTop = iconY(unit);
+  const cardBottom = cardTop + size;
+  const cardCenterY = cardTop + size / 2;
+  const cardRect = { left: iconX(unit), right: iconX(unit) + size, top: cardTop, bottom: cardBottom };
+  const laneCenter = laneY(unit) + BAR_H / 2;
+  const cardEdgeY = laneCenter >= cardCenterY ? cardBottom : cardTop;
+  const anchorX = metaOwnerRouteX(unit, cardRect, cardEdgeY, laneCenter);
+  const firstRect = segmentBarRect(unit, firstSegment);
+  const targetX = clamp(anchorX, firstRect.x, firstRect.x + firstRect.w);
+  return {
+    anchorX,
+    laneCenter,
+    stemTop: Math.min(cardEdgeY, laneCenter),
+    stemHeight: Math.abs(laneCenter - cardEdgeY),
+    cardArmTop: cardEdgeY,
+    cardArmLeft: anchorX < cardRect.left ? anchorX : cardRect.right,
+    cardArmWidth: anchorX < cardRect.left ? cardRect.left - anchorX : anchorX > cardRect.right ? anchorX - cardRect.right : 0,
+    armLeft: Math.min(anchorX, targetX),
+    armWidth: Math.abs(targetX - anchorX)
+  };
+}
+function renderMetaOwnerTether(unit) {
+  const geometry = metaOwnerTetherGeometry(unit);
+  if (!geometry) return;
+  if (geometry.stemHeight > 1) {
+    const stem = addDiv("meta-owner-tether stem", {
+      left: `${geometry.anchorX}px`,
+      top: `${geometry.stemTop}px`,
+      height: `${geometry.stemHeight}px`
+    });
+    stem.dataset.unitId = unit.id;
+    stem.setAttribute("aria-hidden", "true");
+  }
+  if (geometry.cardArmWidth > 1) {
+    const cardArm = addDiv("meta-owner-tether arm card-arm", {
+      left: `${geometry.cardArmLeft}px`,
+      top: `${geometry.cardArmTop}px`,
+      width: `${geometry.cardArmWidth}px`
+    });
+    cardArm.dataset.unitId = unit.id;
+    cardArm.setAttribute("aria-hidden", "true");
+  }
+  if (geometry.armWidth > 1) {
+    const arm = addDiv("meta-owner-tether arm", {
+      left: `${geometry.armLeft}px`,
+      top: `${geometry.laneCenter}px`,
+      width: `${geometry.armWidth}px`
+    });
+    arm.dataset.unitId = unit.id;
+    arm.setAttribute("aria-hidden", "true");
+  }
+}
+function setMetaOwnerHover(unitId) {
+  metaOwnerHoverId = unitId || null;
+  updateMetaOwnerHighlight();
+}
+function setMetaOwnerFocus(unitId) {
+  metaOwnerFocusId = unitId || null;
+  updateMetaOwnerHighlight();
+}
+function updateMetaOwnerHighlight() {
+  if (!els.roadmap) return;
+  const activeId = metaOwnerHoverId || metaOwnerFocusId;
+  els.roadmap.querySelectorAll(".unit-card").forEach(card => {
+    card.classList.toggle("meta-owner-highlight", !!activeId && card.dataset.id === activeId);
+  });
+  els.roadmap.querySelectorAll(".meta-bar, .meta-link, .meta-owner-tether, .lane-track[data-unit-id]").forEach(element => {
+    element.classList.toggle("meta-owner-highlight", !!activeId && element.dataset.unitId === activeId);
+  });
+}
 
 function weekX(week) {
   let x = LEFT_W;
@@ -1875,7 +1998,10 @@ function maxUsedWeek(units = []) {
 function reflowLanes(tierId) {
   state.units
     .filter(unit => unit.tier === tierId && hasVisibleMetaSegments(unit))
-    .sort((a, b) => normalizeWeek(a.week) - normalizeWeek(b.week) || normalizeRowOffset(a.rowOffset) - normalizeRowOffset(b.rowOffset) || a.name.localeCompare(b.name))
+    .sort((a, b) => normalizeWeek(a.week) - normalizeWeek(b.week)
+      || normalizeRowOffset(a.rowOffset) - normalizeRowOffset(b.rowOffset)
+      || sameSlotOffset(a).y - sameSlotOffset(b).y
+      || a.name.localeCompare(b.name))
     .forEach((unit, index) => { unit.lane = index + 1; });
 }
 function formatWeek(week) {
@@ -2097,6 +2223,15 @@ function applyMetaFilters() {
     const matches = unitMatches && statusMatches;
     link.classList.toggle("meta-filter-selected", filtersActive && matches);
     link.classList.toggle("meta-filter-muted", filtersActive && !matches);
+  });
+  els.roadmap?.querySelectorAll(".meta-owner-tether[data-unit-id], .lane-track[data-unit-id]").forEach(element => {
+    const unitId = element.dataset.unitId;
+    const unit = state.units.find(candidate => candidate.id === unitId);
+    const unitMatches = !hasUnitFilters || activeMetaUnitFilters.has(unitId);
+    const statusMatches = !hasStatusFilters || sortedVisibleSegments(unit).some(segment => activeMetaStatusFilters.has(segment.statusId));
+    const matches = unitMatches && statusMatches;
+    element.classList.toggle("meta-filter-selected", filtersActive && matches);
+    element.classList.toggle("meta-filter-muted", filtersActive && !matches);
   });
 }
 function updateAdaptiveRoadmapPresentation() {
