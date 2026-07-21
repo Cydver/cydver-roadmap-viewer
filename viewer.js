@@ -106,6 +106,12 @@ function createLayoutGeometryCache() {
     iconXs: new Map(),
     iconYs: new Map(),
     iconRects: new Map(),
+    slotGroups: new Map(),
+    segmentHorizontalRects: new Map(),
+    segmentBarRects: new Map(),
+    laneOwners: new Map(),
+    cardRectsByLeft: null,
+    betweenSafeComputed: false,
     baseChartHeight: null
   };
 }
@@ -144,6 +150,7 @@ async function init() {
   normalizeState();
   renderAll();
   setTimeout(fitToWidth, 40);
+  scheduleUnitTooltipWarmup();
 }
 
 function bindControls() {
@@ -522,7 +529,7 @@ function renderChart() {
         top: `${laneY(tier.id, lane)}px`,
         width: `${Math.max(4, width - LEFT_W - 20)}px`
       });
-      const owner = state.units.find(unit => unit.tier === tier.id && hasVisibleMetaSegments(unit) && Number(unit.lane) === lane);
+      const owner = layoutGeometryCache.laneOwners.get(`${tier.id}|${lane}`);
       if (owner) track.dataset.unitId = owner.id;
       track.setAttribute("aria-hidden", "true");
     }
@@ -1420,6 +1427,34 @@ function closeUnitProfile(immediate = false) {
   setTimeout(finish, 260);
 }
 
+let unitTooltipWarmupScheduled = false;
+function scheduleUnitTooltipWarmup() {
+  if (unitTooltipWarmupScheduled) return;
+  unitTooltipWarmupScheduled = true;
+  const run = () => {
+    unitTooltipWarmupScheduled = false;
+    if (!tooltipEl || !tooltipEl.classList.contains("hidden") || document.hidden) return;
+    const previousHtml = tooltipEl.innerHTML;
+    const previousVisibility = tooltipEl.style.visibility;
+    const previousLeft = tooltipEl.style.left;
+    const previousTop = tooltipEl.style.top;
+    tooltipEl.innerHTML = `<div class="tooltip-card-header"><h3 class="tooltip-card-title">Preview</h3><div class="tooltip-card-context"><span class="tooltip-tier-badge">Tier</span><span class="tooltip-release">W1</span></div><div class="tooltip-tags"><span class="tooltip-tag">PVP</span><span class="tooltip-tag buff">Buff</span></div></div><div class="tooltip-card-body"><section class="tooltip-card-section tooltip-meta-section"><div class="tooltip-section-title">PVP Meta</div><div class="tooltip-meta-list"><div class="tooltip-meta-row"><i class="tooltip-meta-dot"></i><span class="tooltip-meta-status">Strong</span><span class="tooltip-meta-range">W1–W4</span></div></div></section><section class="tooltip-card-section tooltip-notes-section"><div class="tooltip-section-title">Notes</div><div class="tooltip-note-body">Preview</div></section></div>`;
+    tooltipEl.classList.add("unit-tooltip-card");
+    tooltipEl.classList.remove("hidden");
+    tooltipEl.style.visibility = "hidden";
+    tooltipEl.style.left = "-10000px";
+    tooltipEl.style.top = "0";
+    tooltipEl.getBoundingClientRect();
+    tooltipEl.classList.add("hidden");
+    tooltipEl.style.visibility = previousVisibility;
+    tooltipEl.style.left = previousLeft;
+    tooltipEl.style.top = previousTop;
+    tooltipEl.innerHTML = previousHtml;
+  };
+  if (typeof requestIdleCallback === "function") requestIdleCallback(run, { timeout: 900 });
+  else setTimeout(run, 180);
+}
+
 function showTooltip(event, unit, activeSegment = null, options = {}) {
   const shouldPin = !!options.pin;
   if (tooltipPinned && !shouldPin) return;
@@ -1668,10 +1703,24 @@ function sortedVisibleSegments(unit) {
   return (unit?.segments || []).filter(Boolean).slice().sort((a, b) => normalizeWeek(a.start) - normalizeWeek(b.start) || normalizeWeek(a.end) - normalizeWeek(b.end));
 }
 function hasVisibleMetaSegments(unit) { return hasMetaBars(unit) && Array.isArray(unit?.segments) && unit.segments.length > 0; }
+function segmentHorizontalRect(segment) {
+  const start = Math.min(normalizeWeek(segment?.start), normalizeWeek(segment?.end));
+  const end = Math.max(normalizeWeek(segment?.start), normalizeWeek(segment?.end));
+  const key = `${start}|${end}`;
+  const cached = layoutGeometryCache.segmentHorizontalRects.get(key);
+  if (cached) return cached;
+  const rect = { x: weekX(start) + META_BAR_EDGE_INSET, w: Math.max(4, weekSpanWidth(start, end) - META_BAR_EDGE_INSET * 2) };
+  layoutGeometryCache.segmentHorizontalRects.set(key, rect);
+  return rect;
+}
 function segmentBarRect(unit, segment) {
-  const start = Math.min(normalizeWeek(segment.start), normalizeWeek(segment.end));
-  const end = Math.max(normalizeWeek(segment.start), normalizeWeek(segment.end));
-  return { x: weekX(start) + META_BAR_EDGE_INSET, y: laneY(unit), w: Math.max(4, weekSpanWidth(start, end) - META_BAR_EDGE_INSET * 2), h: BAR_H };
+  const key = `${unit?.id || ""}|${segment?.id || `${segment?.start}|${segment?.end}`}`;
+  const cached = layoutGeometryCache.segmentBarRects.get(key);
+  if (cached) return cached;
+  const span = segmentHorizontalRect(segment);
+  const rect = { x: span.x, y: laneY(unit), w: span.w, h: BAR_H };
+  layoutGeometryCache.segmentBarRects.set(key, rect);
+  return rect;
 }
 function metaSegmentsTouch(previousSegment, nextSegment) {
   if (!previousSegment || !nextSegment) return false;
@@ -1716,6 +1765,34 @@ function renderMetaSegmentLinks(unit) {
     connector.style.setProperty("--link-to", link.toColor);
   });
 }
+function cardRectEntriesByLeft() {
+  if (layoutGeometryCache.cardRectsByLeft) return layoutGeometryCache.cardRectsByLeft;
+  const entries = (state.units || []).map(unit => ({ unit, rect: iconRect(unit) })).sort((a, b) => a.rect.left - b.rect.left);
+  layoutGeometryCache.cardRectsByLeft = entries;
+  return entries;
+}
+function lowerBoundCardRectLeft(entries, value) {
+  let low = 0;
+  let high = entries.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (entries[mid].rect.left < value) low = mid + 1;
+    else high = mid;
+  }
+  return low;
+}
+function metaOwnerRouteBlocked(unitId, x, top, bottom) {
+  const entries = cardRectEntriesByLeft();
+  let index = lowerBoundCardRectLeft(entries, x - ICON_W - 6);
+  for (; index < entries.length; index++) {
+    const { unit, rect } = entries[index];
+    if (rect.left > x + 4) break;
+    if (unit.id === unitId || rect.right < x - 4) continue;
+    const crossesVertically = bottom > rect.top + 2 && top < rect.bottom - 2;
+    if (crossesVertically && x > rect.left - 4 && x < rect.right + 4) return true;
+  }
+  return false;
+}
 function metaOwnerRouteX(unit, cardRect, cardEdgeY, laneCenter) {
   const center = (cardRect.left + cardRect.right) / 2;
   const peers = sameSlotGroup(unit).filter(hasVisibleMetaSegments);
@@ -1734,12 +1811,7 @@ function metaOwnerRouteX(unit, cardRect, cardEdgeY, laneCenter) {
   if (peers.length > 1) candidates.push(center);
   const top = Math.min(cardEdgeY, laneCenter);
   const bottom = Math.max(cardEdgeY, laneCenter);
-  const isBlocked = (x) => state.units.some(other => {
-    if (other.id === unit.id) return false;
-    const rect = iconRect(other);
-    const crossesVertically = bottom > rect.top + 2 && top < rect.bottom - 2;
-    return crossesVertically && x > rect.left - 4 && x < rect.right + 4;
-  });
+  const isBlocked = (x) => metaOwnerRouteBlocked(unit.id, x, top, bottom);
   const minX = LEFT_W + 4;
   const maxX = baseChartWidth() - 4;
   return candidates.find(x => x >= minX && x <= maxX && !isBlocked(x)) ?? clamp(center, minX, maxX);
@@ -1841,7 +1913,11 @@ function updateMetaOwnerHighlight() {
   if (activeId === metaOwnerHighlightedId) return;
   if (metaOwnerHighlightedId) setMetaOwnerHighlightState(metaOwnerHighlightedId, false);
   if (activeId) setMetaOwnerHighlightState(activeId, true);
-  els.roadmap.classList.toggle("meta-owner-context-active", !!activeId);
+  // Avoid a roadmap-wide ancestor state on hover/focus. Descendant selectors
+  // forced every meta mark to be restyled, which is disproportionately costly
+  // in Firefox on large roadmaps. The active owner remains explicit through its
+  // lane band, tether, nodes, bars, and card outline.
+  els.roadmap.classList.remove("meta-owner-context-active");
   metaOwnerHighlightedId = activeId;
 }
 
@@ -1861,54 +1937,62 @@ function tierY(tierId) {
   }
   return y;
 }
-function betweenBoundaryMetaSafeHeight(tierId) {
-  if (layoutGeometryCache.betweenSafeHeights.has(tierId)) return layoutGeometryCache.betweenSafeHeights.get(tierId);
+function computeBetweenSafeHeights() {
+  if (layoutGeometryCache.betweenSafeComputed) return;
+  layoutGeometryCache.betweenSafeComputed = true;
   const tiers = getTiers();
-  const index = tiers.findIndex(tier => tier.id === tierId);
-  const nextTier = index >= 0 ? tiers[index + 1] : null;
-  if (!nextTier) {
-    layoutGeometryCache.betweenSafeHeights.set(tierId, 0);
-    return 0;
-  }
-  const boundaryKey = `between:${tierId}|${nextTier.id}`;
-  const seenSlots = new Set();
-  let requiredHeight = 0;
+  for (const tier of tiers) layoutGeometryCache.betweenSafeHeights.set(tier.id, 0);
 
+  const groupsByTier = new Map();
+  const seenSlots = new Set();
   for (const seed of state.units || []) {
+    const offset = normalizeRowOffset(seed.rowOffset);
+    if (!offset) continue;
+    const index = tierIndex(seed.tier);
+    const upperTier = offset < 0 ? tiers[index - 1] : tiers[index];
+    const lowerTier = offset < 0 ? tiers[index] : tiers[index + 1];
+    if (!upperTier || !lowerTier) continue;
+    const boundaryKey = `between:${upperTier.id}|${lowerTier.id}`;
     if (rowSlotKey(seed) !== boundaryKey) continue;
     const slotKey = visualSlotKey(seed);
     if (seenSlots.has(slotKey)) continue;
     seenSlots.add(slotKey);
-
     const slot = sameSlotOffset(seed);
     const groupWidth = slot.groupWidth || ICON_W;
-    const groupHalfHeight = (slot.groupHeight || ICON_W) / 2;
     const maxGroupLeft = Math.max(LEFT_W, baseChartWidth() - groupWidth);
-    const groupLeft = clamp(weekX(seed.week) + Math.round((weekWidth(seed.week) - groupWidth) / 2), LEFT_W, maxGroupLeft);
-    const groupRight = groupLeft + groupWidth;
-    const horizontalSafety = 8;
-    let lowestCrossingBarBottom = 0;
+    const left = clamp(weekX(seed.week) + Math.round((weekWidth(seed.week) - groupWidth) / 2), LEFT_W, maxGroupLeft);
+    const group = { left, right: left + groupWidth, halfHeight: (slot.groupHeight || ICON_W) / 2, lowestBarBottom: 0 };
+    const list = groupsByTier.get(upperTier.id) || [];
+    list.push(group);
+    groupsByTier.set(upperTier.id, list);
+  }
 
-    for (const owner of state.units || []) {
-      if (owner.tier !== tierId || !hasVisibleMetaSegments(owner)) continue;
-      const laneTop = dynamicBarTop(tierId) + ((Number(owner.lane) || 1) - 1) * BAR_GAP;
-      for (const segment of sortedVisibleSegments(owner)) {
-        const start = normalizeWeek(segment.start);
-        const end = normalizeWeek(segment.end);
-        const left = weekX(start) + META_BAR_EDGE_INSET;
-        const right = left + Math.max(4, weekSpanWidth(start, end) - META_BAR_EDGE_INSET * 2);
-        if (left < groupRight + horizontalSafety && right > groupLeft - horizontalSafety) {
-          lowestCrossingBarBottom = Math.max(lowestCrossingBarBottom, laneTop + BAR_H);
-        }
+  for (const owner of state.units || []) {
+    if (!hasVisibleMetaSegments(owner)) continue;
+    const groups = groupsByTier.get(owner.tier);
+    if (!groups?.length) continue;
+    const laneTop = dynamicBarTop(owner.tier) + ((Number(owner.lane) || 1) - 1) * BAR_GAP;
+    const barBottom = laneTop + BAR_H;
+    for (const segment of sortedVisibleSegments(owner)) {
+      const span = segmentHorizontalRect(segment);
+      const right = span.x + span.w;
+      for (const group of groups) {
+        if (span.x < group.right + 8 && right > group.left - 8) group.lowestBarBottom = Math.max(group.lowestBarBottom, barBottom);
       }
     }
-
-    if (lowestCrossingBarBottom) {
-      requiredHeight = Math.max(requiredHeight, lowestCrossingBarBottom + groupHalfHeight + 12);
-    }
   }
-  layoutGeometryCache.betweenSafeHeights.set(tierId, requiredHeight);
-  return requiredHeight;
+
+  for (const [tierId, groups] of groupsByTier) {
+    let requiredHeight = 0;
+    for (const group of groups) {
+      if (group.lowestBarBottom) requiredHeight = Math.max(requiredHeight, group.lowestBarBottom + group.halfHeight + 12);
+    }
+    layoutGeometryCache.betweenSafeHeights.set(tierId, requiredHeight);
+  }
+}
+function betweenBoundaryMetaSafeHeight(tierId) {
+  computeBetweenSafeHeights();
+  return layoutGeometryCache.betweenSafeHeights.get(tierId) || 0;
 }
 function tierHeight(tierId) {
   if (layoutGeometryCache.tierHeights.has(tierId)) return layoutGeometryCache.tierHeights.get(tierId);
@@ -1926,11 +2010,15 @@ function visibleLaneCount(tierId) {
   if (layoutGeometryCache.visibleLaneCounts.has(tierId)) return layoutGeometryCache.visibleLaneCounts.get(tierId);
   let maxLane = 0;
   for (const unit of state.units || []) {
-    if (unit.tier === tierId && hasVisibleMetaSegments(unit)) maxLane = Math.max(maxLane, Number(unit.lane) || 0);
+    if (unit.tier !== tierId || !hasVisibleMetaSegments(unit)) continue;
+    const lane = Number(unit.lane) || 0;
+    maxLane = Math.max(maxLane, lane);
+    layoutGeometryCache.laneOwners.set(`${tierId}|${lane}`, unit);
   }
   layoutGeometryCache.visibleLaneCounts.set(tierId, maxLane);
   return maxLane;
 }
+
 function laneY(unitOrTier, laneMaybe) {
   const tier = typeof unitOrTier === "string" ? unitOrTier : unitOrTier.tier;
   const lane = typeof unitOrTier === "string" ? laneMaybe : unitOrTier.lane;
@@ -2030,14 +2118,19 @@ function visualStackRank(unit) {
 }
 function sameSlotGroup(unit) {
   if (!unit) return [];
-  return (state.units || [])
-    .filter(other => sameVisualSlot(unit, other))
+  const key = visualSlotKey(unit);
+  const cached = layoutGeometryCache.slotGroups.get(key);
+  if (cached) return cached;
+  const group = (state.units || [])
+    .filter(other => visualSlotKey(other) === key)
     .sort((a, b) => {
       const rankDiff = visualStackRank(a) - visualStackRank(b);
       if (rankDiff) return rankDiff;
       const orderDiff = (Number(a.stackOrder) || 0) - (Number(b.stackOrder) || 0);
       return orderDiff || a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
     });
+  layoutGeometryCache.slotGroups.set(key, group);
+  return group;
 }
 function isCompactBetweenSlot(group) {
   return group.length > 1
@@ -2122,7 +2215,7 @@ function overlappingUnits(unit) {
   const rect = iconRect(unit);
   return (state.units || []).filter(other => other.id !== unit.id && rectsOverlap(rect, iconRect(other)));
 }
-function bringUnitToFront(unitId) {
+function bringUnitToFront(unitId, cardEl = null) {
   const unit = state.units.find(u => u.id === unitId);
   if (!unit) return;
   const overlaps = overlappingUnits(unit);
@@ -2131,16 +2224,23 @@ function bringUnitToFront(unitId) {
   const maxOverlapZ = Math.max(...overlaps.map(other => unitZIndex(other, sameSlotOffset(other))));
   if (currentZ > maxOverlapZ) return;
   let maxOrder = Math.max(0, ...state.units.map(u => Number(u.stackOrder) || 0));
+  let normalizedStackOrders = false;
   if (maxOrder > 100000) {
     state.units.slice().sort((a, b) => (Number(a.stackOrder) || 0) - (Number(b.stackOrder) || 0)).forEach((u, index) => { u.stackOrder = index; });
     maxOrder = Math.max(0, ...state.units.map(u => Number(u.stackOrder) || 0));
+    normalizedStackOrders = true;
   }
   unit.stackOrder = maxOrder + 1;
-  refreshUnitZIndices();
+  if (normalizedStackOrders) refreshUnitZIndices();
+  else {
+    const card = cardEl?.isConnected ? cardEl : els.roadmap?.querySelector?.(`.unit-card[data-id="${CSS.escape(unitId)}"]`);
+    if (card) card.style.zIndex = String(unitZIndex(unit, sameSlotOffset(unit)));
+  }
 }
 function refreshUnitZIndices() {
+  const unitsById = new Map((state.units || []).map(unit => [unit.id, unit]));
   els.roadmap?.querySelectorAll?.(".unit-card").forEach(card => {
-    const unit = state.units.find(u => u.id === card.dataset.id);
+    const unit = unitsById.get(card.dataset.id);
     if (!unit) return;
     card.style.zIndex = String(unitZIndex(unit, sameSlotOffset(unit)));
   });
@@ -2313,75 +2413,83 @@ function compactTierLabel(fullLabel, tierId = "") {
 }
 function updateAdaptiveTierLabels() {
   if (!els.roadmap) return;
-  els.roadmap.querySelectorAll(".tier-label").forEach(label => {
-    const text = label.querySelector(".tier-label-text");
-    if (!text) return;
+  const entries = Array.from(els.roadmap.querySelectorAll(".tier-label")).map(label => ({
+    label,
+    text: label.querySelector(".tier-label-text")
+  })).filter(entry => entry.text);
+
+  for (const { label, text } of entries) {
     const fullLabel = label.dataset.fullLabel || text.textContent || "";
     text.textContent = fullLabel;
     label.dataset.abbreviated = "false";
     label.removeAttribute("tabindex");
     label.removeAttribute("aria-label");
-    const needsCompact = text.scrollWidth > text.clientWidth + 0.5;
-    if (!needsCompact) return;
+  }
+  const compact = entries.filter(({ text }) => text.scrollWidth > text.clientWidth + 0.5);
+  for (const { label, text } of compact) {
+    const fullLabel = label.dataset.fullLabel || text.textContent || "";
     text.textContent = compactTierLabel(fullLabel, label.dataset.tierId || "");
     label.dataset.abbreviated = "true";
     label.tabIndex = 0;
     label.setAttribute("aria-label", fullLabel);
-  });
+  }
 }
 function updateUnitCardDetailVisibility() {
   if (!els.roadmap) return;
-  els.roadmap.querySelectorAll(".unit-card").forEach(card => {
-    const unit = state.units.find(u => u.id === card.dataset.id);
+  const unitsById = new Map((state.units || []).map(unit => [unit.id, unit]));
+  const measurements = [];
+  for (const card of els.roadmap.querySelectorAll(".unit-card")) {
+    const unit = unitsById.get(card.dataset.id);
     const cardRect = card.getBoundingClientRect();
     const tags = card.querySelector(".tags");
     const nameplate = card.querySelector(".nameplate");
+    const tagsRect = tags?.children.length ? tags.getBoundingClientRect() : null;
+    const nameRect = nameplate?.getBoundingClientRect() || null;
+    measurements.push({ card, unit, cardRect, tagsRect, nameRect, hasTags: !!tags?.children.length });
+  }
+  for (const { card, unit, cardRect, tagsRect, nameRect, hasTags } of measurements) {
     const visualSize = Math.min(cardRect.width, cardRect.height);
-
     if (isMs(unit)) {
-      const hasTags = Boolean(tags?.children.length);
-      const tagsRect = hasTags ? tags.getBoundingClientRect() : null;
-      const nameRect = nameplate?.getBoundingClientRect();
-      const tagsFitCard = !tagsRect || tagsRect.bottom <= cardRect.bottom - CARD_TAGS_MIN_BOTTOM_GAP;
+      const tagsFitCard = !hasTags || !tagsRect || tagsRect.bottom <= cardRect.bottom - CARD_TAGS_MIN_BOTTOM_GAP;
       const nameHasRoom = visualSize >= CARD_NAME_MIN_VISUAL_SIZE
         && (!tagsRect || !nameRect || nameRect.top - tagsRect.bottom >= CARD_NAME_MIN_TAG_GAP);
       const iconOnly = visualSize < CARD_DETAILS_MIN_VISUAL_SIZE || !tagsFitCard;
-
       card.classList.toggle("icon-only", iconOnly);
       card.classList.toggle("tags-only", !iconOnly && !nameHasRoom);
-      return;
+      continue;
     }
-
-    let detailsCollide = false;
-    if (tags?.children.length && nameplate) {
-      const tagsRect = tags.getBoundingClientRect();
-      const nameRect = nameplate.getBoundingClientRect();
-      detailsCollide = tagsRect.bottom >= nameRect.top - 2;
-    }
+    const detailsCollide = !!(hasTags && tagsRect && nameRect && tagsRect.bottom >= nameRect.top - 2);
     card.classList.toggle("icon-only", visualSize < CARD_DETAILS_MIN_VISUAL_SIZE || detailsCollide);
     card.classList.remove("tags-only");
-  });
+  }
 }
 function updateMetaBarLabelVisibility() {
   if (!els.roadmap) return;
-  els.roadmap.querySelectorAll(".meta-bar").forEach(bar => {
-    const label = bar.querySelector(".bar-label");
-    if (!label) return;
+  const entries = Array.from(els.roadmap.querySelectorAll(".meta-bar")).map(bar => ({
+    bar,
+    label: bar.querySelector(".bar-label")
+  })).filter(entry => entry.label);
+  for (const { label } of entries) {
     label.hidden = false;
+    label.textContent = label.dataset.fullLabel || label.textContent || "";
+  }
+  const needsUnitLabel = [];
+  const shouldHide = new Set();
+  for (const { bar, label } of entries) {
     const renderedHeight = bar.getBoundingClientRect().height;
     if (renderedHeight < META_LABEL_MIN_RENDERED_HEIGHT) {
-      label.hidden = true;
-      return;
+      shouldHide.add(label);
+      continue;
     }
-    const fullLabel = label.dataset.fullLabel || label.textContent || "";
-    const unitLabel = label.dataset.unitLabel || fullLabel;
-    label.textContent = fullLabel;
-    if (label.scrollWidth <= label.clientWidth + 1) return;
-    label.textContent = unitLabel;
-    if (label.scrollWidth <= label.clientWidth + 1) return;
-    label.hidden = true;
-  });
+    if (label.scrollWidth > label.clientWidth + 1) needsUnitLabel.push(label);
+  }
+  for (const label of needsUnitLabel) label.textContent = label.dataset.unitLabel || label.dataset.fullLabel || "";
+  for (const label of needsUnitLabel) {
+    if (label.scrollWidth > label.clientWidth + 1) shouldHide.add(label);
+  }
+  for (const { label } of entries) label.hidden = shouldHide.has(label);
 }
+
 function toggleMetaStatusFilter(statusId) {
   if (activeMetaStatusFilters.has(statusId)) activeMetaStatusFilters.delete(statusId);
   else activeMetaStatusFilters.add(statusId);
