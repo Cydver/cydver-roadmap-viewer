@@ -2595,3 +2595,37 @@ body {
   visibility: hidden;
   transition: opacity .1s ease, visibility 0s linear .1s;
 }
+
+/* Meta timeline refinement: adaptive labels + contrast-aware typography. */
+.bar-label {
+  color: var(--bar-text, #f8fbff);
+  -webkit-text-stroke: calc(.18px * var(--barTextBoost)) rgba(0,0,0,.62);
+  text-shadow: 0 1px 1px rgba(0,0,0,.72), 0 0 3px rgba(0,0,0,.48);
+}
+.meta-bar[data-text-tone="dark"] .bar-label {
+  -webkit-text-stroke: 0;
+  text-shadow: 0 1px 0 rgba(255,255,255,.16);
+}
+.bar-label[hidden] { display: none !important; }
+
+/* Viewer-only click filters. Multiple status and MS filters can be active together. */
+.legend-item[role="button"] { cursor: pointer; user-select: none; }
+.legend-item.meta-filter-selected {
+  border-color: rgba(99,211,255,.46);
+  background: rgba(99,211,255,.085);
+  box-shadow: inset 0 0 0 1px rgba(99,211,255,.09), 0 0 14px rgba(99,211,255,.08);
+}
+.legend-item.meta-filter-muted { opacity: .32; }
+.meta-bar.meta-filter-muted {
+  opacity: .18;
+  filter: saturate(.48) brightness(.72);
+}
+.meta-link.meta-filter-muted {
+  opacity: .12;
+  filter: saturate(.45) brightness(.7);
+}
+.meta-bar.meta-filter-selected {
+  opacity: 1;
+  box-shadow: 0 8px 20px rgba(0,0,0,.36), 0 0 0 1px rgba(99,211,255,.2), 0 0 15px rgba(99,211,255,.08), inset 0 1px 0 rgba(255,255,255,.18);
+}
+.meta-link.meta-filter-selected { opacity: .95; }

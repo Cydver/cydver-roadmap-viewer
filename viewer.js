@@ -46,6 +46,8 @@ const BAR_GAP = 23;
 const BAR_H = 18;
 const META_LINK_H = BAR_H;
 const META_LINK_OVERLAP = 3;
+const META_BAR_EDGE_INSET = 6;
+const META_LABEL_MIN_RENDERED_HEIGHT = 9;
 const BAR_BOTTOM_PAD = 34;
 
 const DEFAULT_STATE = {
@@ -64,6 +66,9 @@ let catalogIconIndex = new Map();
 let catalogKindNameIndex = new Map();
 let zoomScale = 1;
 let activeUnitId = null;
+const activeMetaStatusFilters = new Set();
+const activeMetaUnitFilters = new Set();
+const metaFilterClickTimers = new Map();
 let tooltipEl = null;
 let tooltipPinned = false;
 let unitProfileOverlay = null;
@@ -394,10 +399,24 @@ function renderLegend() {
   getStatuses().forEach(status => {
     const item = document.createElement("span");
     item.className = "legend-item";
+    item.dataset.statusId = status.id;
+    item.setAttribute("role", "button");
+    item.setAttribute("tabindex", "0");
+    item.setAttribute("aria-pressed", activeMetaStatusFilters.has(status.id) ? "true" : "false");
     item.innerHTML = `<i class="legend-swatch" style="--legend-color:${escapeAttr(status.color)}"></i>${escapeHtml(status.label)}`;
     const description = String(status.description || "").trim();
-    item.setAttribute("aria-label", description ? `${status.label}: ${description}` : status.label);
-    bindAppTooltip(item, () => `<h3>${escapeHtml(status.label)}</h3>${description ? `<div class="app-tooltip-description">${multilineHtml(description)}</div>` : ""}`);
+    item.setAttribute("aria-label", `${status.label}. Click to toggle this PVP meta filter.${description ? ` ${description}` : ""}`);
+    bindAppTooltip(item, () => `<h3>${escapeHtml(status.label)}</h3>${description ? `<div class="app-tooltip-description">${multilineHtml(description)}</div>` : ""}<div class="app-tooltip-description">Click to filter this status on or off.</div>`);
+    item.addEventListener("click", event => {
+      event.stopPropagation();
+      hideAppTooltip(true);
+      toggleMetaStatusFilter(status.id);
+    });
+    item.addEventListener("keydown", event => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      toggleMetaStatusFilter(status.id);
+    });
     els.legend.appendChild(item);
   });
 }
@@ -563,35 +582,62 @@ function renderUnit(unit) {
 
 function renderSegment(unit, segment, index = 0, total = 1) {
   if (!hasVisibleMetaSegments(unit)) return;
+  const segments = sortedVisibleSegments(unit);
   const rect = segmentBarRect(unit, segment);
   const bar = document.createElement("div");
-  const isFirst = index === 0;
-  const isLast = index === total - 1;
-  bar.className = `meta-bar${activeUnitId === unit.id ? " active" : ""}${isFirst ? " segment-first" : " segment-inner-left"}${isLast ? " segment-last" : " segment-inner-right"}`;
+  const joinsPrevious = index > 0 && metaSegmentsTouch(segments[index - 1], segment);
+  const joinsNext = index < total - 1 && metaSegmentsTouch(segment, segments[index + 1]);
+  bar.className = `meta-bar${activeUnitId === unit.id ? " active" : ""}${joinsPrevious ? " segment-inner-left" : " segment-first"}${joinsNext ? " segment-inner-right" : " segment-last"}`;
+  bar.dataset.unitId = unit.id;
+  bar.dataset.segmentId = segment.id;
+  bar.dataset.statusId = segment.statusId;
   bar.style.left = `${rect.x}px`;
   bar.style.top = `${rect.y}px`;
   bar.style.width = `${rect.w}px`;
-  bar.style.setProperty("--bar", segmentColor(segment));
+  const color = segmentColor(segment);
+  const textPresentation = metaBarTextPresentation(color);
+  bar.style.setProperty("--bar", color);
+  bar.style.setProperty("--bar-text", textPresentation.color);
+  bar.dataset.textTone = textPresentation.tone;
   bar.setAttribute("tabindex", "0");
-  bar.setAttribute("aria-label", `${unit.name} - ${metaStatus(segment.statusId).label}`);
+  bar.setAttribute("aria-label", `${unit.name} - ${metaStatus(segment.statusId).label}. Click to toggle this MS timeline filter. Double-click or press Enter to open Full Profile.`);
 
   const label = document.createElement("span");
   label.className = "bar-label";
-  label.textContent = `${unit.name} - ${metaStatus(segment.statusId).label}`;
+  label.dataset.fullLabel = `${unit.name} - ${metaStatus(segment.statusId).label}`;
+  label.dataset.unitLabel = unit.name;
+  label.textContent = label.dataset.fullLabel;
   bar.appendChild(label);
 
   bar.addEventListener("click", event => {
     event.stopPropagation();
     if (suppressRoadmapClick || performance.now() < suppressTouchClickUntil) return;
+    const existing = metaFilterClickTimers.get(unit.id);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      metaFilterClickTimers.delete(unit.id);
+      toggleMetaUnitFilter(unit.id);
+    }, 210);
+    metaFilterClickTimers.set(unit.id, timer);
+  });
+  bar.addEventListener("dblclick", event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const pending = metaFilterClickTimers.get(unit.id);
+    if (pending) clearTimeout(pending);
+    metaFilterClickTimers.delete(unit.id);
     openUnitProfile(unit.id, segment.id);
   });
   bar.addEventListener("mouseenter", event => showTooltip(event, unit, segment));
   bar.addEventListener("mouseleave", () => hideTooltip(false));
   bar.addEventListener("pointermove", moveTooltip);
   bar.addEventListener("keydown", event => {
-    if (event.key === "Enter" || event.key === " ") {
+    if (event.key === "Enter") {
       event.preventDefault();
       openUnitProfile(unit.id, segment.id);
+    } else if (event.key === " ") {
+      event.preventDefault();
+      toggleMetaUnitFilter(unit.id);
     }
   });
   els.roadmap.appendChild(bar);
@@ -1527,18 +1573,34 @@ function hasVisibleMetaSegments(unit) { return hasMetaBars(unit) && Array.isArra
 function segmentBarRect(unit, segment) {
   const start = Math.min(normalizeWeek(segment.start), normalizeWeek(segment.end));
   const end = Math.max(normalizeWeek(segment.start), normalizeWeek(segment.end));
-  return { x: weekX(start) + 12, y: laneY(unit), w: Math.max(4, weekSpanWidth(start, end) - 24), h: BAR_H };
+  return { x: weekX(start) + META_BAR_EDGE_INSET, y: laneY(unit), w: Math.max(4, weekSpanWidth(start, end) - META_BAR_EDGE_INSET * 2), h: BAR_H };
+}
+function metaSegmentsTouch(previousSegment, nextSegment) {
+  if (!previousSegment || !nextSegment) return false;
+  const previousEnd = Math.max(normalizeWeek(previousSegment.start), normalizeWeek(previousSegment.end));
+  const nextStart = Math.min(normalizeWeek(nextSegment.start), normalizeWeek(nextSegment.end));
+  return nextStart <= previousEnd + 1;
 }
 function metaSegmentLinks(unit) {
   const segments = sortedVisibleSegments(unit);
   const links = [];
   for (let i = 1; i < segments.length; i++) {
+    if (!metaSegmentsTouch(segments[i - 1], segments[i])) continue;
     const previous = segmentBarRect(unit, segments[i - 1]);
     const next = segmentBarRect(unit, segments[i]);
     const x = previous.x + previous.w - META_LINK_OVERLAP;
     const w = next.x - x + META_LINK_OVERLAP;
     if (w <= META_LINK_OVERLAP * 2) continue;
-    links.push({ x, y: previous.y + (BAR_H - META_LINK_H) / 2, w, fromColor: segmentColor(segments[i - 1]), toColor: segmentColor(segments[i]) });
+    links.push({
+      x,
+      y: previous.y + (BAR_H - META_LINK_H) / 2,
+      w,
+      unitId: unit.id,
+      fromStatusId: segments[i - 1].statusId,
+      toStatusId: segments[i].statusId,
+      fromColor: segmentColor(segments[i - 1]),
+      toColor: segmentColor(segments[i])
+    });
   }
   return links;
 }
@@ -1549,6 +1611,9 @@ function renderMetaSegmentLinks(unit) {
       top: `${link.y}px`,
       width: `${link.w}px`
     });
+    connector.dataset.unitId = link.unitId;
+    connector.dataset.statusFrom = link.fromStatusId;
+    connector.dataset.statusTo = link.toStatusId;
     connector.style.setProperty("--link-from", link.fromColor);
     connector.style.setProperty("--link-to", link.toColor);
   });
@@ -1893,6 +1958,30 @@ function barLabelTextScale(scale = zoomScale) {
   const normalized = clamp(Number(scale) || 1, MIN_ZOOM, MAX_ZOOM);
   return clamp(Math.pow(1 / normalized, 0.9), 1, 3.4);
 }
+function parseHexColor(value) {
+  const match = /^#([0-9a-f]{6})$/i.exec(String(value || "").trim());
+  if (!match) return null;
+  const hex = match[1];
+  return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
+}
+function relativeLuminance(rgb) {
+  if (!rgb) return 0;
+  const linear = rgb.map(channel => {
+    const value = channel / 255;
+    return value <= 0.04045 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+}
+function metaBarTextPresentation(color) {
+  const background = relativeLuminance(parseHexColor(color));
+  const light = [248, 251, 255];
+  const dark = [7, 13, 18];
+  const lightContrast = (relativeLuminance(light) + 0.05) / (background + 0.05);
+  const darkContrast = (background + 0.05) / (relativeLuminance(dark) + 0.05);
+  return darkContrast > lightContrast
+    ? { color: "#070d12", tone: "dark" }
+    : { color: "#f8fbff", tone: "light" };
+}
 function compactTierLabel(fullLabel, tierId = "") {
   const preset = TIER_LABEL_ABBREVIATIONS[tierId];
   if (preset) return preset;
@@ -1935,9 +2024,66 @@ function updateUnitCardDetailVisibility() {
     card.classList.toggle("icon-only", visualSize < CARD_DETAILS_MIN_VISUAL_SIZE || detailsCollide);
   });
 }
+function updateMetaBarLabelVisibility() {
+  if (!els.roadmap) return;
+  els.roadmap.querySelectorAll(".meta-bar").forEach(bar => {
+    const label = bar.querySelector(".bar-label");
+    if (!label) return;
+    label.hidden = false;
+    const renderedHeight = bar.getBoundingClientRect().height;
+    if (renderedHeight < META_LABEL_MIN_RENDERED_HEIGHT) {
+      label.hidden = true;
+      return;
+    }
+    const fullLabel = label.dataset.fullLabel || label.textContent || "";
+    const unitLabel = label.dataset.unitLabel || fullLabel;
+    label.textContent = fullLabel;
+    if (label.scrollWidth <= label.clientWidth + 1) return;
+    label.textContent = unitLabel;
+    if (label.scrollWidth <= label.clientWidth + 1) return;
+    label.hidden = true;
+  });
+}
+function toggleMetaStatusFilter(statusId) {
+  if (activeMetaStatusFilters.has(statusId)) activeMetaStatusFilters.delete(statusId);
+  else activeMetaStatusFilters.add(statusId);
+  applyMetaFilters();
+}
+function toggleMetaUnitFilter(unitId) {
+  if (activeMetaUnitFilters.has(unitId)) activeMetaUnitFilters.delete(unitId);
+  else activeMetaUnitFilters.add(unitId);
+  applyMetaFilters();
+}
+function applyMetaFilters() {
+  const hasStatusFilters = activeMetaStatusFilters.size > 0;
+  const hasUnitFilters = activeMetaUnitFilters.size > 0;
+  const filtersActive = hasStatusFilters || hasUnitFilters;
+  els.legend?.querySelectorAll(".legend-item[data-status-id]").forEach(item => {
+    const selected = activeMetaStatusFilters.has(item.dataset.statusId);
+    item.classList.toggle("meta-filter-selected", selected);
+    item.classList.toggle("meta-filter-muted", hasStatusFilters && !selected);
+    item.setAttribute("aria-pressed", selected ? "true" : "false");
+  });
+  els.roadmap?.querySelectorAll(".meta-bar[data-unit-id]").forEach(bar => {
+    const unitMatches = !hasUnitFilters || activeMetaUnitFilters.has(bar.dataset.unitId);
+    const statusMatches = !hasStatusFilters || activeMetaStatusFilters.has(bar.dataset.statusId);
+    const matches = unitMatches && statusMatches;
+    bar.classList.toggle("meta-filter-selected", filtersActive && matches);
+    bar.classList.toggle("meta-filter-muted", filtersActive && !matches);
+  });
+  els.roadmap?.querySelectorAll(".meta-link[data-unit-id]").forEach(link => {
+    const unitMatches = !hasUnitFilters || activeMetaUnitFilters.has(link.dataset.unitId);
+    const statusMatches = !hasStatusFilters || activeMetaStatusFilters.has(link.dataset.statusFrom) || activeMetaStatusFilters.has(link.dataset.statusTo);
+    const matches = unitMatches && statusMatches;
+    link.classList.toggle("meta-filter-selected", filtersActive && matches);
+    link.classList.toggle("meta-filter-muted", filtersActive && !matches);
+  });
+}
 function updateAdaptiveRoadmapPresentation() {
   updateAdaptiveTierLabels();
   updateUnitCardDetailVisibility();
+  updateMetaBarLabelVisibility();
+  applyMetaFilters();
 }
 function setMessage(text) {
   if (!text) {
