@@ -3278,3 +3278,131 @@ body {
     box-shadow: 0 0 0 1px rgba(255,255,255,.12);
   }
 }
+
+/* --- Shared roadmap tag palette + contrast parity with Builder --- */
+/* Roadmap-card tags are a shared semantic surface: use the same palette in both
+   applications, then choose the higher-contrast dark foreground on bright chips. */
+.tag.pvp { background: rgba(230,64,91,.88); color: #16070b; text-shadow: none; }
+.tag.pve { background: rgba(63,143,245,.88); color: #06101d; text-shadow: none; }
+.tag.buff { background: rgba(67,220,125,.92); color: #06120a; border-color: rgba(218,255,231,.78); text-shadow: none; }
+.tag.core { background: rgba(247,180,53,.9); color: #130d00; text-shadow: none; }
+.tag.tech { background: rgba(171,108,255,.88); color: #100718; text-shadow: none; }
+.tag.def { background: rgba(86,218,150,.88); color: #06120c; text-shadow: none; }
+.tag.sub { background: rgba(79,214,190,.88); color: #06120f; text-shadow: none; }
+.tag.cb { background: rgba(255,140,72,.9); color: #170a00; text-shadow: none; }
+.tag.must-p5 { background: rgba(255,43,66,.95); color: #160407; text-shadow: none; }
+
+/* --- Robust mobile gesture ownership --- */
+@media (pointer: coarse) {
+  /* The chart owns both pan and pinch. Allowing native one-finger pan while also
+     implementing a custom two-finger pinch lets the UA cancel the first pointer
+     before the second finger arrives. A transform-only custom pan keeps the same
+     compositor path while guaranteeing a stable two-pointer stream everywhere,
+     including directly over unit cards/meta bars. */
+  .chart-scroll {
+    touch-action: none;
+    overscroll-behavior: contain;
+  }
+}
+
+/* --- Mobile custom-unit filter tray --- */
+@media (max-width: 520px) and (pointer: coarse) {
+  .legend-panel.custom-filter-editing {
+    overflow: hidden;
+  }
+  .legend-panel.custom-filter-editing .legend-wrap {
+    display: block;
+  }
+  .legend-panel.custom-filter-editing .legend-title,
+  .legend-panel.custom-filter-editing .legend-wrap > .legend {
+    display: none;
+  }
+  .legend-panel.custom-filter-editing .legend-filter-controls {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    margin: 0;
+    padding: 2px 0 0;
+  }
+  .legend-panel.custom-filter-editing .legend-filter-status {
+    grid-column: 1 / -1;
+    width: 100%;
+    min-width: 0;
+    min-height: 24px;
+    display: flex;
+    align-items: center;
+    padding: 5px 7px;
+    border: 1px solid rgba(99,211,255,.16);
+    border-radius: 6px;
+    background: rgba(7,15,22,.82);
+    color: #dff7ff;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .legend-panel.custom-filter-editing .legend-filter-controls button {
+    width: 100%;
+    min-width: 0;
+    height: 30px;
+    min-height: 30px;
+    padding: 5px 6px !important;
+    font-size: 10px;
+  }
+  .legend-panel.custom-filter-editing .legend-filter-hint {
+    margin-top: 0;
+    padding: 5px 2px 0;
+    border-top: 0;
+    font-size: 9px;
+    line-height: 1.25;
+  }
+}
+
+@media (orientation: landscape) and (max-height: 600px) and (pointer: coarse) {
+  .legend-panel.custom-filter-editing {
+    overflow: hidden;
+  }
+  .legend-panel.custom-filter-editing .legend-wrap {
+    position: relative;
+    min-height: 27px;
+  }
+  .legend-panel.custom-filter-editing .legend-title,
+  .legend-panel.custom-filter-editing .legend-wrap > .legend {
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .legend-panel.custom-filter-editing .legend-filter-controls {
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    width: 100%;
+    display: grid;
+    grid-template-columns: minmax(120px, 1fr) auto auto auto;
+    align-items: center;
+    gap: 5px;
+    margin: 0;
+    padding: 0 1px;
+    border-radius: 6px;
+    background: rgba(6,12,18,.97);
+    box-shadow: 0 0 0 1px rgba(99,211,255,.12), 0 8px 20px rgba(0,0,0,.22);
+  }
+  .legend-panel.custom-filter-editing .legend-filter-status {
+    min-width: 0;
+    min-height: 25px;
+    display: flex;
+    align-items: center;
+    padding: 4px 7px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .legend-panel.custom-filter-editing .legend-filter-controls button {
+    min-width: 0;
+    height: 25px;
+    min-height: 25px;
+    padding: 4px 8px !important;
+    font-size: 9px;
+  }
+  .legend-panel.custom-filter-editing .legend-filter-hint {
+    display: none !important;
+  }
+}
+.tag.custom { background: #657386; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.52); }
