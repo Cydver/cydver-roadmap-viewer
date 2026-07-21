@@ -58,6 +58,8 @@ const DEFAULT_STATE = {
 
 let state = structuredClone(DEFAULT_STATE);
 let catalogIndex = new Map();
+let catalogIconIndex = new Map();
+let catalogKindNameIndex = new Map();
 let zoomScale = 1;
 let activeUnitId = null;
 let tooltipEl = null;
@@ -172,9 +174,64 @@ async function loadOptionalCatalog() {
     const json = await response.json();
     const items = Array.isArray(json) ? json : json.items || [];
     catalogIndex = new Map(items.map(item => [sanitizeText(item.name).toLowerCase(), item]));
+    buildCatalogSourceIndices(items);
   } catch {
     catalogIndex = new Map();
+    catalogIconIndex = new Map();
+    catalogKindNameIndex = new Map();
   }
+}
+
+function normalizeAltemaSourceUrl(value, kind = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw, "https://altema.jp/");
+    if (url.protocol !== "https:" || !/^(?:www\.)?altema\.jp$/i.test(url.hostname)) return "";
+    const match = url.pathname.match(/^\/gundamuce\/(ms|chara)\/(\d+)\/?$/i);
+    if (!match) return "";
+    const expected = String(kind || "").toLowerCase() === "pilot" ? "chara" : String(kind || "").toLowerCase() === "ms" ? "ms" : "";
+    if (expected && match[1].toLowerCase() !== expected) return "";
+    return `https://altema.jp/gundamuce/${match[1].toLowerCase()}/${match[2]}`;
+  } catch {
+    return "";
+  }
+}
+
+function catalogKindNameKey(kind, name) {
+  return `${String(kind || "").trim().toLowerCase()}:${sanitizeText(name).toLowerCase()}`;
+}
+
+function buildCatalogSourceIndices(items = []) {
+  catalogIconIndex = new Map();
+  catalogKindNameIndex = new Map();
+  for (const item of items || []) {
+    const kind = String(item?.kind || item?.type || "").trim().toLowerCase();
+    const sourceUrl = normalizeAltemaSourceUrl(item?.sourceUrl, kind);
+    if (!sourceUrl) continue;
+    for (const icon of [item?.icon, item?.remoteIcon]) {
+      const key = String(icon || "").trim();
+      if (key && !catalogIconIndex.has(key)) catalogIconIndex.set(key, sourceUrl);
+    }
+    const nameKey = catalogKindNameKey(kind, item?.name);
+    if (!nameKey.endsWith(":")) {
+      const existing = catalogKindNameIndex.get(nameKey);
+      if (!existing) catalogKindNameIndex.set(nameKey, sourceUrl);
+      else if (existing !== sourceUrl) catalogKindNameIndex.set(nameKey, null);
+    }
+  }
+}
+
+function catalogAltemaUrlForUnit(unit) {
+  if (!unit) return "";
+  const kind = String(unit.kind || unit.type || "").trim().toLowerCase();
+  const direct = normalizeAltemaSourceUrl(unit.sourceUrl ?? unit.altemaUrl, kind);
+  if (direct) return direct;
+  const icon = String(unit.icon || "").trim();
+  const byIcon = icon ? catalogIconIndex.get(icon) : "";
+  if (byIcon) return normalizeAltemaSourceUrl(byIcon, kind);
+  const byName = catalogKindNameIndex.get(catalogKindNameKey(kind, unit.name));
+  return byName ? normalizeAltemaSourceUrl(byName, kind) : "";
 }
 
 function readHashRoadmap() {
@@ -281,6 +338,7 @@ function normalizeState() {
       rowOffset: normalizeRowOffset(u.rowOffset ?? u.tierOffset ?? 0),
       stackOrder: Number(u.stackOrder) || 0,
       icon: resolveIcon(u),
+      sourceUrl: catalogAltemaUrlForUnit(u),
       tags: cleanTags(rawTags),
       minPotential: String(kind).toLowerCase() === "ms" ? normalizePotentialLevel(u.minPotential ?? u.minimumPotential ?? u.minP) : null,
       idealPotential: String(kind).toLowerCase() === "ms" ? normalizePotentialLevel(u.idealPotential ?? u.recommendedPotential ?? u.idealP) : null,
@@ -729,10 +787,44 @@ function profileArtHtml(unit, typeLabel) {
   return `<div class="unit-profile-art">${image}</div>`;
 }
 
+
+function profileAltemaLinkHtml(unit) {
+  if (!isMs(unit)) return "";
+  const sourceUrl = catalogAltemaUrlForUnit(unit);
+  if (!sourceUrl) return "";
+  return `<a class="unit-profile-source-link" href="${escapeAttr(sourceUrl)}" target="_blank" rel="noopener noreferrer" data-profile-altema-link aria-label="See on Altema"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 5h5v5M19 5l-9 9M17 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h5"/></svg></a>`;
+}
+
+function bindProfileAltemaTooltips(root) {
+  root?.querySelectorAll("[data-profile-altema-link]").forEach(link => {
+    const tooltipHtml = () => `<strong>See on Altema</strong>`;
+    const showSourceTooltip = event => {
+      showAppTooltip(event, tooltipHtml, false);
+      appTooltipEl?.classList.add("unit-profile-source-tooltip");
+    };
+    link.addEventListener("pointerenter", event => {
+      if (event.pointerType === "touch") return;
+      showSourceTooltip(event);
+    });
+    link.addEventListener("pointermove", event => {
+      if (event.pointerType === "touch" || appTooltipPinned) return;
+      if (!appTooltipEl) showSourceTooltip(event);
+      else positionAppTooltip(appTooltipEl, event);
+    });
+    link.addEventListener("pointerleave", () => hideAppTooltip(true));
+    link.addEventListener("focus", () => {
+      const rect = link.getBoundingClientRect();
+      showSourceTooltip({ clientX: rect.right, clientY: rect.top + rect.height / 2 });
+    });
+    link.addEventListener("blur", () => hideAppTooltip(true));
+    link.addEventListener("click", () => hideAppTooltip(true));
+  });
+}
+
 function profileContextHtml(unit) {
   if (!unit) return "";
   const color = tierById(unit.tier).color || "#8d96a6";
-  return `<div class="unit-profile-context"><span class="unit-profile-tier" style="--profile-tier-color:${escapeAttr(color)}">${escapeHtml(unitRowLabel(unit))}</span><span>${escapeHtml(formatWeek(unit.week))}</span></div>`;
+  return `<div class="unit-profile-context"><span class="unit-profile-tier" style="--profile-tier-color:${escapeAttr(color)}">${escapeHtml(unitRowLabel(unit))}</span><span>${escapeHtml(formatWeek(unit.week))}</span>${profileAltemaLinkHtml(unit)}</div>`;
 }
 
 function profileInvestmentHtml(unit) {
@@ -1102,6 +1194,7 @@ function openUnitProfile(unitId, activeSegmentId = null) {
   unitProfileOverlay = overlay;
   bindProfileTagTooltips(overlay);
   bindProfileMetaTooltips(overlay);
+  bindProfileAltemaTooltips(overlay);
   bindUnitProfileAdaptiveRows(overlay);
   bindProfileNoteReaders(overlay);
   overlay.querySelector(".unit-profile-close")?.focus({ preventScroll: true });
