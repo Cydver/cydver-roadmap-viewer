@@ -2639,7 +2639,7 @@ body {
 .meta-focus-dimmer {
   position: absolute;
   left: var(--left);
-  top: calc(var(--monthH) + var(--weekH));
+  top: calc(var(--month-h) + var(--week-h));
   right: 0;
   bottom: 0;
   z-index: 9;
@@ -2808,3 +2808,176 @@ body {
 .lane-track.meta-filter-selected.meta-owner-highlight::before { opacity: .86; }
 .meta-owner-context-active .meta-bar.meta-owner-highlight,
 .meta-owner-context-active .meta-link.meta-owner-highlight { opacity: 1; }
+
+
+/* --- Viewer legend/filter/control refinement --- */
+.legend-panel {
+  display: grid;
+  gap: 7px;
+}
+.legend-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.legend-title {
+  flex: 0 0 auto;
+  color: #dbe7ff;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .095em;
+  text-transform: uppercase;
+}
+.legend-title span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .06em;
+}
+.legend-wrap > .legend {
+  flex: 1 1 auto;
+  min-width: 220px;
+}
+.legend-filter-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+.legend-filter-controls button {
+  min-height: 31px;
+  padding: 6px 10px;
+  border: 1px solid rgba(255,255,255,.105);
+  border-radius: 8px;
+  background: rgba(255,255,255,.035);
+  color: #dbe6f5;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
+  cursor: pointer;
+  font-weight: 750;
+  transition:
+    transform var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) ease,
+    background var(--motion-fast) ease,
+    box-shadow var(--motion-fast) ease,
+    color var(--motion-fast) ease;
+}
+.legend-filter-controls button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(99,211,255,.28);
+  background: rgba(99,211,255,.055);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.045), 0 5px 14px rgba(0,0,0,.14);
+}
+.legend-filter-controls button:active { transform: translateY(0); }
+.legend-filter-controls button.active,
+.legend-filter-controls .primary-action {
+  color: #effbff;
+  border-color: rgba(99,211,255,.48);
+  background: linear-gradient(180deg, rgba(39,88,113,.96), rgba(20,48,65,.96));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 0 0 1px rgba(99,211,255,.06);
+}
+.legend-filter-controls .primary-action:hover {
+  border-color: rgba(99,211,255,.78);
+  background: linear-gradient(180deg, rgba(48,105,133,.98), rgba(23,58,78,.98));
+}
+.legend-filter-hint {
+  color: #94a6ba;
+  font-size: 11px;
+  line-height: 1.35;
+  letter-spacing: .02em;
+}
+
+/* Meta-status tooltip: preserve description copy, but separate name and interaction hint. */
+.app-tooltip-status-name {
+  color: var(--tooltip-status-color, #dff7ff);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--tooltip-status-color, #dff7ff) 25%, transparent);
+}
+.app-tooltip-filter-hint {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid rgba(255,255,255,.09);
+  color: #94a6ba;
+  line-height: 1.35;
+}
+
+/* Match the Builder's flatter neutral button language for Viewer chrome. */
+.viewer-controls button {
+  min-width: 0;
+  height: 34px;
+  padding: 7px 11px;
+  border: 1px solid rgba(255,255,255,.105);
+  border-radius: 8px;
+  background: rgba(255,255,255,.035);
+  color: #dbe6f5;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
+  font-weight: 750;
+}
+.viewer-controls button:hover {
+  border-color: rgba(99,211,255,.28);
+  background: rgba(99,211,255,.055);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.045), 0 5px 14px rgba(0,0,0,.14);
+}
+.viewer-controls button[aria-expanded="true"] {
+  color: #effbff;
+  border-color: rgba(99,211,255,.48);
+  background: linear-gradient(180deg, rgba(39,88,113,.74), rgba(20,48,65,.78));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.075), 0 0 0 1px rgba(99,211,255,.055);
+}
+
+/* The roadmap is a panning/selecting surface, never a native text-selection surface. */
+.chart-scroll,
+.chart-stage,
+.roadmap,
+.roadmap * {
+  -webkit-user-select: none;
+  user-select: none;
+}
+.unit-card img {
+  -webkit-user-drag: none;
+  user-drag: none;
+}
+
+/* Custom unit-filter edit mode: selection is explicit, then Save returns normal interaction. */
+.roadmap.custom-unit-filter-editing .unit-card.custom-filter-eligible,
+.roadmap.custom-unit-filter-editing .meta-bar {
+  cursor: pointer;
+}
+.roadmap.custom-unit-filter-editing .unit-card.custom-filter-eligible {
+  outline: calc(1px * var(--textBoost, 1)) dashed rgba(139,215,244,.42);
+  outline-offset: calc(3px * var(--textBoost, 1));
+}
+.roadmap.custom-unit-filter-editing .unit-card.custom-filter-picked {
+  outline: calc(3px * var(--textBoost, 1)) solid rgba(222,248,255,.96);
+  outline-offset: calc(4px * var(--textBoost, 1));
+}
+
+@media (max-width: 820px) {
+  .legend-wrap {
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .legend-title { padding-top: 7px; }
+  .legend-wrap > .legend {
+    flex: 1 1 100%;
+    min-width: 0;
+    order: 3;
+  }
+  .legend-filter-controls {
+    margin-left: auto;
+  }
+}
+
+@media (max-width: 520px) {
+  .legend-filter-controls {
+    width: 100%;
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
+  .legend-filter-controls button { flex: 1 1 auto; }
+}
+.unit-card.custom-filter-active-selected {
+  outline: calc(2px * var(--textBoost, 1)) solid rgba(216,246,255,.82);
+  outline-offset: calc(3px * var(--textBoost, 1));
+}

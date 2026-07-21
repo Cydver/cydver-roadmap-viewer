@@ -71,6 +71,8 @@ let zoomScale = 1;
 let activeUnitId = null;
 const activeMetaStatusFilters = new Set();
 const activeMetaUnitFilters = new Set();
+let customUnitFilterEditing = false;
+let customUnitFilterDraft = new Set();
 const metaFilterClickTimers = new Map();
 let metaOwnerHoverId = null;
 let metaOwnerFocusId = null;
@@ -148,6 +150,11 @@ const els = {
   chartStage: document.getElementById("chartStage"),
   chartScroll: document.getElementById("chartScroll"),
   legend: document.getElementById("statusLegend"),
+  customUnitFilterButton: document.getElementById("btnCustomUnitFilter"),
+  customUnitFilterSaveButton: document.getElementById("btnSaveCustomUnitFilter"),
+  customUnitFilterClearButton: document.getElementById("btnClearCustomUnitFilter"),
+  customUnitFilterCancelButton: document.getElementById("btnCancelCustomUnitFilter"),
+  customUnitFilterHint: document.getElementById("customUnitFilterHint"),
   summary: document.getElementById("summary"),
   message: document.getElementById("message"),
   zoomLabel: document.getElementById("zoomLabel"),
@@ -179,6 +186,14 @@ function bindControls() {
   document.getElementById("btnOpenDiamondPlanner")?.addEventListener("click", openDiamondPlanner);
   document.getElementById("btnCloseDiamondPlanner")?.addEventListener("click", closeDiamondPlanner);
   document.getElementById("btnClearDiamondPlanner")?.addEventListener("click", clearDiamondPlanner);
+  els.customUnitFilterButton?.addEventListener("click", enterCustomUnitFilterMode);
+  els.customUnitFilterSaveButton?.addEventListener("click", saveCustomUnitFilter);
+  els.customUnitFilterClearButton?.addEventListener("click", clearCustomUnitFilterDraft);
+  els.customUnitFilterCancelButton?.addEventListener("click", cancelCustomUnitFilterMode);
+  els.chartScroll?.addEventListener("selectstart", event => event.preventDefault());
+  els.chartScroll?.addEventListener("dragstart", event => {
+    if (event.target.closest?.(".unit-card img")) event.preventDefault();
+  });
   els.plannerBalance?.addEventListener("input", () => {
     diamondPlanner.balance = Math.max(0, Math.round(Number(els.plannerBalance.value) || 0));
     saveDiamondPlanner();
@@ -186,6 +201,7 @@ function bindControls() {
   });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
+    if (customUnitFilterEditing) { cancelCustomUnitFilterMode(); return; }
     if (unitNoteReaderOverlay) { closeUnitNoteReader(); return; }
     if (unitProfileOverlay) { closeUnitProfile(); return; }
     closeDrawer();
@@ -505,6 +521,7 @@ function renderAll() {
   renderChart();
   applyZoom();
   renderDiamondPlanner();
+  updateCustomUnitFilterControls();
 }
 
 function renderSummary() {
@@ -527,7 +544,7 @@ function renderLegend() {
     item.innerHTML = `<i class="legend-swatch" style="--legend-color:${escapeAttr(status.color)}"></i>${escapeHtml(status.label)}`;
     const description = String(status.description || "").trim();
     item.setAttribute("aria-label", `${status.label}. Click to toggle this PVP meta filter.${description ? ` ${description}` : ""}`);
-    bindAppTooltip(item, () => `<h3>${escapeHtml(status.label)}</h3>${description ? `<div class="app-tooltip-description">${multilineHtml(description)}</div>` : ""}<div class="app-tooltip-description">Click to filter this status on or off.</div>`);
+    bindAppTooltip(item, () => `<h3 class="app-tooltip-status-name" style="--tooltip-status-color:${escapeAttr(status.color)}">${escapeHtml(status.label)}</h3>${description ? `<div class="app-tooltip-description">${multilineHtml(description)}</div>` : ""}<div class="app-tooltip-filter-hint">Click to filter this status on or off.</div>`);
     item.addEventListener("click", event => {
       event.stopPropagation();
       hideAppTooltip(true);
@@ -644,6 +661,8 @@ function renderUnit(unit) {
   const card = document.createElement("article");
   card.className = `unit-card${activeUnitId === unit.id ? " active" : ""}${hasMustP5(unit) ? " must-p5" : ""}${hasBuff(unit) ? " buff" : ""}${normalizeRowOffset(unit.rowOffset) ? " between-row" : ""}`;
   card.dataset.id = unit.id;
+  const metaOwner = metaOwnerForUnit(unit);
+  if (metaOwner?.id && hasVisibleMetaSegments(metaOwner)) card.dataset.metaOwnerId = metaOwner.id;
   card.style.left = `${iconX(unit)}px`;
   card.style.top = `${iconY(unit)}px`;
   card.style.width = `${size}px`;
@@ -656,6 +675,7 @@ function renderUnit(unit) {
     const img = reusableRoadmapImage(unit) || document.createElement("img");
     if (!img.getAttribute("src")) img.src = unit.icon;
     img.alt = unit.name;
+    img.draggable = false;
     img.crossOrigin = "anonymous";
     img.onerror = () => tryIconFallback(img, unit);
     card.appendChild(img);
@@ -692,24 +712,34 @@ function renderUnit(unit) {
   card.addEventListener("click", event => {
     event.stopPropagation();
     if (suppressRoadmapClick || performance.now() < suppressTouchClickUntil) return;
+    if (customUnitFilterEditing) {
+      toggleCustomUnitFilterDraft(unit);
+      return;
+    }
     bringUnitToFront(unit.id);
     openUnitProfile(unit.id);
   });
   card.addEventListener("mouseenter", event => {
     bringUnitToFront(unit.id);
+    if (customUnitFilterEditing) return;
     setMetaOwnerHover(metaOwnerForUnit(unit)?.id || null);
     showTooltip(event, unit, null, { anchor: card });
   });
   card.addEventListener("mouseleave", () => {
-    setMetaOwnerHover(null);
+    if (!customUnitFilterEditing) setMetaOwnerHover(null);
     hideTooltip(false);
   });
-  card.addEventListener("focus", () => setMetaOwnerFocus(metaOwnerForUnit(unit)?.id || null));
-  card.addEventListener("blur", () => setMetaOwnerFocus(null));
+  card.addEventListener("focus", () => {
+    if (!customUnitFilterEditing) setMetaOwnerFocus(metaOwnerForUnit(unit)?.id || null);
+  });
+  card.addEventListener("blur", () => {
+    if (!customUnitFilterEditing) setMetaOwnerFocus(null);
+  });
   card.addEventListener("keydown", event => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      openUnitProfile(unit.id);
+      if (customUnitFilterEditing) toggleCustomUnitFilterDraft(unit);
+      else openUnitProfile(unit.id);
     }
   });
   els.roadmap.appendChild(card);
@@ -747,6 +777,10 @@ function renderSegment(unit, segment, index = 0, total = 1) {
   bar.addEventListener("click", event => {
     event.stopPropagation();
     if (suppressRoadmapClick || performance.now() < suppressTouchClickUntil) return;
+    if (customUnitFilterEditing) {
+      toggleCustomUnitFilterDraft(unit);
+      return;
+    }
     const existing = metaFilterClickTimers.get(unit.id);
     if (existing) clearTimeout(existing);
     const timer = setTimeout(() => {
@@ -758,28 +792,36 @@ function renderSegment(unit, segment, index = 0, total = 1) {
   bar.addEventListener("dblclick", event => {
     event.preventDefault();
     event.stopPropagation();
+    if (customUnitFilterEditing) return;
     const pending = metaFilterClickTimers.get(unit.id);
     if (pending) clearTimeout(pending);
     metaFilterClickTimers.delete(unit.id);
     openUnitProfile(unit.id, segment.id);
   });
   bar.addEventListener("mouseenter", event => {
+    if (customUnitFilterEditing) return;
     setMetaOwnerHover(unit.id);
     showTooltip(event, unit, segment, { anchor: bar });
   });
   bar.addEventListener("mouseleave", () => {
-    setMetaOwnerHover(null);
+    if (!customUnitFilterEditing) setMetaOwnerHover(null);
     hideTooltip(false);
   });
-  bar.addEventListener("focus", () => setMetaOwnerFocus(unit.id));
-  bar.addEventListener("blur", () => setMetaOwnerFocus(null));
+  bar.addEventListener("focus", () => {
+    if (!customUnitFilterEditing) setMetaOwnerFocus(unit.id);
+  });
+  bar.addEventListener("blur", () => {
+    if (!customUnitFilterEditing) setMetaOwnerFocus(null);
+  });
   bar.addEventListener("keydown", event => {
     if (event.key === "Enter") {
       event.preventDefault();
-      openUnitProfile(unit.id, segment.id);
+      if (customUnitFilterEditing) toggleCustomUnitFilterDraft(unit);
+      else openUnitProfile(unit.id, segment.id);
     } else if (event.key === " ") {
       event.preventDefault();
-      toggleMetaUnitFilter(unit.id);
+      if (customUnitFilterEditing) toggleCustomUnitFilterDraft(unit);
+      else toggleMetaUnitFilter(unit.id);
     }
   });
   els.roadmap.appendChild(bar);
@@ -2615,10 +2657,72 @@ function toggleMetaUnitFilter(unitId) {
   if (activeMetaUnitFilters.has(unitId)) activeMetaUnitFilters.delete(unitId);
   else activeMetaUnitFilters.add(unitId);
   applyMetaFilters();
+  updateCustomUnitFilterControls();
+}
+function effectiveMetaUnitFilters() {
+  return customUnitFilterEditing ? customUnitFilterDraft : activeMetaUnitFilters;
+}
+function enterCustomUnitFilterMode() {
+  if (customUnitFilterEditing) return;
+  customUnitFilterDraft = new Set(activeMetaUnitFilters);
+  customUnitFilterEditing = true;
+  setMetaOwnerHover(null);
+  setMetaOwnerFocus(null);
+  hideTooltip(true);
+  hideAppTooltip(true);
+  updateCustomUnitFilterControls();
+  applyMetaFilters();
+  els.roadmap?.classList.add("custom-unit-filter-editing");
+}
+function saveCustomUnitFilter() {
+  if (!customUnitFilterEditing) return;
+  activeMetaUnitFilters.clear();
+  customUnitFilterDraft.forEach(unitId => activeMetaUnitFilters.add(unitId));
+  customUnitFilterEditing = false;
+  customUnitFilterDraft = new Set();
+  els.roadmap?.classList.remove("custom-unit-filter-editing");
+  applyMetaFilters();
+  updateCustomUnitFilterControls();
+}
+function cancelCustomUnitFilterMode() {
+  if (!customUnitFilterEditing) return;
+  customUnitFilterEditing = false;
+  customUnitFilterDraft = new Set();
+  els.roadmap?.classList.remove("custom-unit-filter-editing");
+  applyMetaFilters();
+  updateCustomUnitFilterControls();
+}
+function clearCustomUnitFilterDraft() {
+  if (!customUnitFilterEditing) return;
+  customUnitFilterDraft.clear();
+  applyMetaFilters();
+  updateCustomUnitFilterControls();
+}
+function toggleCustomUnitFilterDraft(unit) {
+  const owner = metaOwnerForUnit(unit);
+  if (!owner?.id || !hasVisibleMetaSegments(owner)) return;
+  if (customUnitFilterDraft.has(owner.id)) customUnitFilterDraft.delete(owner.id);
+  else customUnitFilterDraft.add(owner.id);
+  applyMetaFilters();
+  updateCustomUnitFilterControls();
+}
+function updateCustomUnitFilterControls() {
+  const count = customUnitFilterEditing ? customUnitFilterDraft.size : activeMetaUnitFilters.size;
+  if (els.customUnitFilterButton) {
+    els.customUnitFilterButton.textContent = customUnitFilterEditing ? `Selecting Units${count ? ` (${count})` : ""}` : `Filter Units${count ? ` (${count})` : ""}`;
+    els.customUnitFilterButton.classList.toggle("active", customUnitFilterEditing || count > 0);
+    els.customUnitFilterButton.setAttribute("aria-pressed", count > 0 ? "true" : "false");
+    els.customUnitFilterButton.setAttribute("aria-expanded", customUnitFilterEditing ? "true" : "false");
+  }
+  els.customUnitFilterSaveButton?.classList.toggle("hidden", !customUnitFilterEditing);
+  els.customUnitFilterClearButton?.classList.toggle("hidden", !customUnitFilterEditing);
+  els.customUnitFilterCancelButton?.classList.toggle("hidden", !customUnitFilterEditing);
+  els.customUnitFilterHint?.classList.toggle("hidden", !customUnitFilterEditing);
 }
 function applyMetaFilters() {
+  const unitFilters = effectiveMetaUnitFilters();
   const hasStatusFilters = activeMetaStatusFilters.size > 0;
-  const hasUnitFilters = activeMetaUnitFilters.size > 0;
+  const hasUnitFilters = unitFilters.size > 0;
   const filtersActive = hasStatusFilters || hasUnitFilters;
   els.legend?.querySelectorAll(".legend-item[data-status-id]").forEach(item => {
     const selected = activeMetaStatusFilters.has(item.dataset.statusId);
@@ -2627,14 +2731,14 @@ function applyMetaFilters() {
     item.setAttribute("aria-pressed", selected ? "true" : "false");
   });
   els.roadmap?.querySelectorAll(".meta-bar[data-unit-id]").forEach(bar => {
-    const unitMatches = !hasUnitFilters || activeMetaUnitFilters.has(bar.dataset.unitId);
+    const unitMatches = !hasUnitFilters || unitFilters.has(bar.dataset.unitId);
     const statusMatches = !hasStatusFilters || activeMetaStatusFilters.has(bar.dataset.statusId);
     const matches = unitMatches && statusMatches;
     bar.classList.toggle("meta-filter-selected", filtersActive && matches);
     bar.classList.toggle("meta-filter-muted", filtersActive && !matches);
   });
   els.roadmap?.querySelectorAll(".meta-link[data-unit-id]").forEach(link => {
-    const unitMatches = !hasUnitFilters || activeMetaUnitFilters.has(link.dataset.unitId);
+    const unitMatches = !hasUnitFilters || unitFilters.has(link.dataset.unitId);
     const statusMatches = !hasStatusFilters || activeMetaStatusFilters.has(link.dataset.statusFrom) || activeMetaStatusFilters.has(link.dataset.statusTo);
     const matches = unitMatches && statusMatches;
     link.classList.toggle("meta-filter-selected", filtersActive && matches);
@@ -2643,11 +2747,17 @@ function applyMetaFilters() {
   els.roadmap?.querySelectorAll(".meta-owner-tether[data-unit-id], .meta-owner-node[data-unit-id], .lane-track[data-unit-id]").forEach(element => {
     const unitId = element.dataset.unitId;
     const unit = state.units.find(candidate => candidate.id === unitId);
-    const unitMatches = !hasUnitFilters || activeMetaUnitFilters.has(unitId);
+    const unitMatches = !hasUnitFilters || unitFilters.has(unitId);
     const statusMatches = !hasStatusFilters || sortedVisibleSegments(unit).some(segment => activeMetaStatusFilters.has(segment.statusId));
     const matches = unitMatches && statusMatches;
     element.classList.toggle("meta-filter-selected", filtersActive && matches);
     element.classList.toggle("meta-filter-muted", filtersActive && !matches);
+  });
+  els.roadmap?.querySelectorAll(".unit-card[data-meta-owner-id]").forEach(card => {
+    const ownerId = card.dataset.metaOwnerId;
+    card.classList.toggle("custom-filter-picked", customUnitFilterEditing && customUnitFilterDraft.has(ownerId));
+    card.classList.toggle("custom-filter-eligible", customUnitFilterEditing);
+    card.classList.toggle("custom-filter-active-selected", !customUnitFilterEditing && hasUnitFilters && unitFilters.has(ownerId));
   });
 }
 function updateAdaptiveRoadmapPresentation() {
