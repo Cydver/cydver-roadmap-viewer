@@ -600,8 +600,12 @@ function openDiamondPlanner() {
   closeDrawer();
   renderDiamondPlanner();
   els.planner?.classList.remove("hidden");
+  document.getElementById("btnOpenDiamondPlanner")?.setAttribute("aria-expanded", "true");
 }
-function closeDiamondPlanner() { els.planner?.classList.add("hidden"); }
+function closeDiamondPlanner() {
+  els.planner?.classList.add("hidden");
+  document.getElementById("btnOpenDiamondPlanner")?.setAttribute("aria-expanded", "false");
+}
 function clearDiamondPlanner() {
   diamondPlanner = { balance: 0, spends: {} };
   saveDiamondPlanner();
