@@ -113,12 +113,32 @@ function createLayoutGeometryCache() {
     laneOwners: new Map(),
     cardRectsByLeft: null,
     betweenSafeComputed: false,
+    wideWeeks: null,
+    weekBoundaryXs: null,
     baseChartHeight: null
   };
 }
 let layoutGeometryCache = createLayoutGeometryCache();
+let roadmapImageReuseCache = new Map();
 function invalidateLayoutGeometryCache() {
   layoutGeometryCache = createLayoutGeometryCache();
+}
+function captureRoadmapImagesForRender() {
+  const next = new Map();
+  els.roadmap?.querySelectorAll(".unit-card[data-id] > img").forEach(img => {
+    const unitId = img.parentElement?.dataset?.id;
+    if (unitId) next.set(unitId, img);
+  });
+  roadmapImageReuseCache = next;
+}
+function reusableRoadmapImage(unit) {
+  if (!unit?.icon) return null;
+  const img = roadmapImageReuseCache.get(unit.id);
+  roadmapImageReuseCache.delete(unit.id);
+  if (!img || img.getAttribute("src") !== unit.icon) return null;
+  img.alt = unit.name;
+  img.crossOrigin = "anonymous";
+  return img;
 }
 const DIAMOND_PLANNER_STORAGE_KEY = "uceDiamondPlannerV1";
 let diamondPlanner = { balance: 0, spends: {} };
@@ -463,6 +483,7 @@ function renderLegend() {
 }
 
 function renderChart() {
+  captureRoadmapImagesForRender();
   const width = baseChartWidth();
   const height = baseChartHeight();
   els.roadmap.innerHTML = "";
@@ -554,6 +575,7 @@ function renderChart() {
     .slice()
     .sort((a, b) => unitZIndex(a, sameSlotOffset(a)) - unitZIndex(b, sameSlotOffset(b)) || a.name.localeCompare(b.name))
     .forEach(renderUnit);
+  roadmapImageReuseCache.clear();
 }
 
 function renderUnit(unit) {
@@ -571,8 +593,8 @@ function renderUnit(unit) {
   card.setAttribute("aria-label", unit.name);
 
   if (unit.icon) {
-    const img = document.createElement("img");
-    img.src = unit.icon;
+    const img = reusableRoadmapImage(unit) || document.createElement("img");
+    if (!img.getAttribute("src")) img.src = unit.icon;
     img.alt = unit.name;
     img.crossOrigin = "anonymous";
     img.onerror = () => tryIconFallback(img, unit);
@@ -1676,34 +1698,44 @@ function tierIndex(id) { return Math.max(0, getTiers().findIndex(t => t.id === i
 function metaStatus(id) { return getStatuses().find(s => s.id === id) || getStatuses()[2] || DEFAULT_META_STATUSES[2]; }
 function defaultMetaStatusId() { return getStatuses()[2]?.id || getStatuses()[0]?.id || "s3"; }
 function segmentColor(segment) { return metaStatus(segment.statusId).color; }
-function weekNeedsWideColumn(week) {
-  const targetWeek = normalizeWeek(week);
+function wideWeekSet() {
+  if (layoutGeometryCache.wideWeeks) return layoutGeometryCache.wideWeeks;
   const slots = new Map();
+  const wideWeeks = new Set();
   for (const unit of state.units || []) {
-    if (normalizeWeek(unit.week) !== targetWeek || !normalizeRowOffset(unit.rowOffset)) continue;
-    const key = rowSlotKey(unit);
-    if (!key.startsWith("between:")) continue;
-    const entry = slots.get(key) || { ms: false, pilot: false };
-    if (isMs(unit)) entry.ms = true;
-    if (isPilot(unit)) entry.pilot = true;
-    slots.set(key, entry);
-    if (entry.ms && entry.pilot) return true;
+    if (!normalizeRowOffset(unit.rowOffset)) continue;
+    const rowKey = rowSlotKey(unit);
+    if (!rowKey.startsWith("between:")) continue;
+    const week = normalizeWeek(unit.week);
+    const key = `${week}|${rowKey}`;
+    const flags = slots.get(key) || 0;
+    const next = flags | (isMs(unit) ? 1 : 0) | (isPilot(unit) ? 2 : 0);
+    slots.set(key, next);
+    if (next === 3) wideWeeks.add(week);
   }
-  return false;
+  layoutGeometryCache.wideWeeks = wideWeeks;
+  return wideWeeks;
 }
+function weekNeedsWideColumn(week) { return wideWeekSet().has(normalizeWeek(week)); }
 function weekWidth(week) { return weekNeedsWideColumn(week) ? WIDE_CELL_W : CELL_W; }
+function ensureWeekBoundaryXs() {
+  if (layoutGeometryCache.weekBoundaryXs) return layoutGeometryCache.weekBoundaryXs;
+  const total = weekCount();
+  const boundaries = new Array(total + 1);
+  boundaries[0] = LEFT_W;
+  for (let week = 1; week <= total; week++) boundaries[week] = boundaries[week - 1] + weekWidth(week);
+  layoutGeometryCache.weekBoundaryXs = boundaries;
+  return boundaries;
+}
 function weekBoundaryX(completedWeeks) {
-  let x = LEFT_W;
   const count = clamp(Math.round(Number(completedWeeks) || 0), 0, weekCount());
-  for (let w = 1; w <= count; w++) x += weekWidth(w);
-  return x;
+  return ensureWeekBoundaryXs()[count];
 }
 function weekSpanWidth(start, end) {
   const first = Math.min(normalizeWeek(start), normalizeWeek(end));
   const last = Math.max(normalizeWeek(start), normalizeWeek(end));
-  let width = 0;
-  for (let w = first; w <= last; w++) width += weekWidth(w);
-  return width;
+  const boundaries = ensureWeekBoundaryXs();
+  return boundaries[last] - boundaries[first - 1];
 }
 function monthPixelWidth(index) {
   const counts = getMonthWeeks();
@@ -1935,10 +1967,8 @@ function updateMetaOwnerHighlight() {
 }
 
 function weekX(week) {
-  let x = LEFT_W;
   const target = clamp(Math.round(Number(week) || 1), 1, weekCount());
-  for (let w = 1; w < target; w++) x += weekWidth(w);
-  return x;
+  return ensureWeekBoundaryXs()[target - 1];
 }
 function tierY(tierId) {
   if (layoutGeometryCache.tierYs.has(tierId)) return layoutGeometryCache.tierYs.get(tierId);
