@@ -3406,3 +3406,70 @@ body {
   }
 }
 .tag.custom { background: #657386; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.52); }
+
+/* --- Maximum mobile interaction performance --- */
+/* Isolate the very large absolute-positioned roadmap from the rest of the page so
+   transform-driven gestures do not invalidate surrounding layout/paint work. */
+.roadmap {
+  contain: layout paint style;
+}
+
+@media (pointer: coarse) {
+  /* On WebKit/iOS, GestureEvent gives us the native pinch scale independently of
+     the pointer stream. Keep one-finger movement on the browser's momentum-scroll
+     path and reserve custom handling for the pinch itself. */
+  .chart-scroll.webkit-native-gesture-input {
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Backdrop filtering a full phone viewport forces extra compositing work exactly
+     when the profile is trying to appear. Mobile uses a slightly darker veil for
+     the same separation while desktop keeps the existing blur. */
+  .unit-profile-overlay {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: rgba(2, 5, 10, .86);
+  }
+
+  /* Nothing inside the roadmap changes semantic state during a live pinch, so
+     transitions only add bookkeeping/raster pressure. Restore them immediately
+     when the gesture ends. */
+  .chart-scroll.touch-pinching .roadmap *,
+  .chart-scroll.touch-pinching .roadmap *::before,
+  .chart-scroll.touch-pinching .roadmap *::after {
+    transition: none !important;
+  }
+}
+
+/* --- Mobile active-gesture raster simplification --- */
+@media (pointer: coarse) {
+  /* During finger-down pan/pinch, preserve all geometry/data but temporarily drop
+     expensive decorative raster effects. They return immediately on release. */
+  .chart-scroll.touch-active .unit-card,
+  .chart-scroll.touch-gesturing .unit-card,
+  .chart-scroll.touch-active .meta-bar,
+  .chart-scroll.touch-gesturing .meta-bar,
+  .chart-scroll.touch-active .meta-owner-tether,
+  .chart-scroll.touch-gesturing .meta-owner-tether,
+  .chart-scroll.touch-active .meta-owner-node,
+  .chart-scroll.touch-gesturing .meta-owner-node,
+  .chart-scroll.touch-active .meta-lane-track,
+  .chart-scroll.touch-gesturing .meta-lane-track {
+    box-shadow: none !important;
+    text-shadow: none !important;
+  }
+
+  .chart-scroll.touch-active .meta-bar,
+  .chart-scroll.touch-gesturing .meta-bar,
+  .chart-scroll.touch-active .meta-link,
+  .chart-scroll.touch-gesturing .meta-link {
+    filter: none !important;
+  }
+
+  .chart-scroll.touch-active .roadmap *,
+  .chart-scroll.touch-active .roadmap *::before,
+  .chart-scroll.touch-active .roadmap *::after {
+    transition: none !important;
+  }
+}

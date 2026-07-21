@@ -69,6 +69,12 @@ let state = structuredClone(DEFAULT_STATE);
 let catalogIndex = new Map();
 let catalogIconIndex = new Map();
 let catalogKindNameIndex = new Map();
+let unitByIdIndex = new Map();
+let pairedMsByPilotId = new Map();
+let pairedPilotByMsId = new Map();
+let profileTimelineCache = [];
+const profileImageWarmCache = new Map();
+let profileImageWarmupGeneration = 0;
 let zoomScale = 1;
 let activeUnitId = null;
 const activeMetaStatusFilters = new Set();
@@ -104,6 +110,8 @@ let pendingTouchPinchFrame = null;
 let suppressTouchClickUntil = 0;
 let lastInputModality = "pointer";
 let profileReturnFocusByKeyboard = false;
+let useWebKitNativeGestureInput = false;
+let webKitPinchGesture = null;
 
 function createLayoutGeometryCache() {
   return {
@@ -150,6 +158,87 @@ function reusableRoadmapImage(unit) {
   img.crossOrigin = "anonymous";
   return img;
 }
+
+function ensureProfileImageWarmEntry(url, priority = "auto") {
+  const src = String(url || "").trim();
+  if (!src) return null;
+  const existing = profileImageWarmCache.get(src);
+  if (existing) {
+    if (priority === "high") {
+      try { existing.img.fetchPriority = "high"; } catch {}
+    }
+    return existing;
+  }
+
+  const img = new Image();
+  img.decoding = "async";
+  img.loading = "eager";
+  img.crossOrigin = "anonymous";
+  try { img.fetchPriority = priority; } catch {}
+  const entry = { img, ready: false, failed: false, decodePromise: null };
+  profileImageWarmCache.set(src, entry);
+  img.src = src;
+  return entry;
+}
+
+async function decodeProfileWarmEntry(entry) {
+  if (!entry || entry.ready || entry.failed) return;
+  if (entry.decodePromise) return entry.decodePromise;
+  entry.decodePromise = (async () => {
+    try {
+      if (typeof entry.img.decode === "function") await entry.img.decode();
+      else if (!entry.img.complete) await new Promise((resolve, reject) => {
+        entry.img.addEventListener("load", resolve, { once: true });
+        entry.img.addEventListener("error", reject, { once: true });
+      });
+      entry.ready = entry.img.naturalWidth > 0;
+      entry.failed = !entry.ready;
+    } catch {
+      entry.failed = true;
+    }
+  })();
+  return entry.decodePromise;
+}
+
+function startProfileImageWarmup() {
+  const generation = ++profileImageWarmupGeneration;
+  const urls = [...new Set((state.units || []).map(unit => String(unit.icon || "").trim()).filter(Boolean))];
+  if (!urls.length) return;
+
+  // Start all fetches immediately so the static Viewer can reuse warm HTTP/image
+  // cache entries. Decode in a small idle-time queue so first paint is not competing
+  // with dozens of image decodes on mobile WebKit. Pointer-down on a specific unit
+  // still promotes that MS/pilot pair immediately.
+  const entries = urls.map(url => ensureProfileImageWarmEntry(url)).filter(Boolean);
+  const startDecodeWorkers = () => {
+    if (generation !== profileImageWarmupGeneration) return;
+    let cursor = 0;
+    const worker = async () => {
+      while (generation === profileImageWarmupGeneration && cursor < entries.length) {
+        const entry = entries[cursor++];
+        await decodeProfileWarmEntry(entry);
+      }
+    };
+    const concurrency = Math.min(4, entries.length);
+    for (let i = 0; i < concurrency; i++) worker();
+  };
+
+  if (typeof requestIdleCallback === "function") {
+    requestIdleCallback(startDecodeWorkers, { timeout: 900 });
+  } else {
+    setTimeout(startDecodeWorkers, 120);
+  }
+}
+
+function warmProfilePairImages(unit) {
+  if (!unit) return;
+  const ms = isMs(unit) ? unit : pairedMsForPilot(unit);
+  const pilot = isPilot(unit) ? unit : pairedPilotForMs(unit);
+  for (const candidate of [ms, pilot]) {
+    const entry = ensureProfileImageWarmEntry(candidate?.icon, "high");
+    if (entry) decodeProfileWarmEntry(entry);
+  }
+}
 const DIAMOND_PLANNER_STORAGE_KEY = "uceDiamondPlannerV1";
 let diamondPlanner = { balance: 0, spends: {} };
 
@@ -183,12 +272,18 @@ async function init() {
   tooltipEl = els.tooltip;
   loadDiamondPlanner();
   bindControls();
-  await loadOptionalCatalog();
+
+  // Catalog data is useful for optional Altema backfill, but it is not required to
+  // draw the roadmap. Fetch it in parallel so a large static catalog never blocks
+  // the first usable Viewer frame.
+  const catalogPromise = loadOptionalCatalog();
   await loadRoadmap();
   normalizeState();
+  startProfileImageWarmup();
   renderAll();
   setTimeout(fitToWidth, 40);
   scheduleUnitTooltipWarmup();
+  catalogPromise.then(backfillCatalogSourceUrls).catch(() => {});
 }
 
 function bindControls() {
@@ -228,6 +323,26 @@ function bindControls() {
   });
   els.roadmap.addEventListener("pointerdown", beginPan);
   els.chartScroll.addEventListener("wheel", handleWheelZoom, { passive: false });
+
+  // WebKit exposes high-level GestureEvent scale data on iOS. When available,
+  // let the browser keep native one-finger momentum scrolling and use that native
+  // pinch stream for roadmap zoom. This avoids routing every single-finger pan
+  // through JavaScript on iPhone/iPad while keeping page zoom disabled.
+  useWebKitNativeGestureInput = isMobileTouchViewport()
+    && ("ongesturestart" in window || typeof window.GestureEvent === "function");
+  els.chartScroll.classList.toggle("webkit-native-gesture-input", useWebKitNativeGestureInput);
+  if (useWebKitNativeGestureInput) {
+    els.chartScroll.addEventListener("gesturestart", beginWebKitPinchGesture, { passive: false });
+    els.chartScroll.addEventListener("gesturechange", moveWebKitPinchGesture, { passive: false });
+    els.chartScroll.addEventListener("gestureend", endWebKitPinchGesture, { passive: false });
+    // Keep decorative raster effects out of WebKit's native scrolling hot path.
+    // This does not intercept the gesture; it only marks the period while fingers
+    // are down so CSS can temporarily simplify shadows/filters.
+    els.chartScroll.addEventListener("touchstart", markWebKitTouchActive, { passive: true });
+    els.chartScroll.addEventListener("touchend", markWebKitTouchActive, { passive: true });
+    els.chartScroll.addEventListener("touchcancel", clearWebKitTouchActive, { passive: true });
+  }
+
   els.chartScroll.addEventListener("pointerdown", beginTouchGesture);
   window.addEventListener("pointermove", movePan);
   window.addEventListener("pointerup", endPan);
@@ -262,7 +377,7 @@ async function loadRoadmap() {
   }
 
   try {
-    const response = await fetch("data/roadmap.json", { cache: "no-store" });
+    const response = await fetch("data/roadmap.json", { cache: "no-cache" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const json = await response.json();
     state = Array.isArray(json) ? { ...structuredClone(DEFAULT_STATE), units: json } : { ...structuredClone(DEFAULT_STATE), ...json };
@@ -275,7 +390,7 @@ async function loadRoadmap() {
 
 async function loadOptionalCatalog() {
   try {
-    const response = await fetch("data/catalog.json", { cache: "no-store" });
+    const response = await fetch("data/catalog.json");
     if (!response.ok) return;
     const json = await response.json();
     const items = Array.isArray(json) ? json : json.items || [];
@@ -285,6 +400,15 @@ async function loadOptionalCatalog() {
     catalogIndex = new Map();
     catalogIconIndex = new Map();
     catalogKindNameIndex = new Map();
+  }
+}
+
+function backfillCatalogSourceUrls() {
+  if (!catalogIndex.size && !catalogIconIndex.size && !catalogKindNameIndex.size) return;
+  for (const unit of state.units || []) {
+    if (normalizeAltemaSourceUrl(unit.sourceUrl, unit.kind)) continue;
+    const resolved = catalogAltemaUrlForUnit(unit);
+    if (resolved) unit.sourceUrl = resolved;
   }
 }
 
@@ -359,7 +483,7 @@ async function readPrivateHashRoadmap() {
     if (!globalThis.crypto?.subtle) throw new Error("Private roadmap decryption requires a secure browser context (HTTPS or localhost).");
     const keyBytes = base64urlToBytes(params.get("key") || "");
     if (keyBytes.length !== 32) throw new Error("Private share key is missing or invalid.");
-    const response = await fetch(`data/private/${encodeURIComponent(shareId)}.uce.enc`, { cache: "no-store" });
+    const response = await fetch(`data/private/${encodeURIComponent(shareId)}.uce.enc`, { cache: "no-cache" });
     if (!response.ok) {
       if (response.status === 404) throw new Error(`Encrypted roadmap ${shareId}.uce.enc was not found in data/private/.`);
       throw new Error(`Could not load encrypted roadmap (HTTP ${response.status}).`);
@@ -516,6 +640,10 @@ function normalizeState() {
   });
 
   state.tiers.forEach(tier => reflowLanes(tier.id));
+  // Viewer data is immutable after load, so build all relationship/navigation
+  // indices once here. syncPilotLanes can then use the cached pairing map rather
+  // than rescanning every unit for every pilot.
+  rebuildStaticRuntimeIndices();
   syncPilotLanes();
 }
 
@@ -692,6 +820,9 @@ function renderUnit(unit) {
     if (!img.getAttribute("src")) img.src = unit.icon;
     img.alt = unit.name;
     img.draggable = false;
+    img.decoding = "async";
+    img.width = Math.round(size);
+    img.height = Math.round(size);
     img.crossOrigin = "anonymous";
     img.onerror = () => tryIconFallback(img, unit);
     card.appendChild(img);
@@ -725,6 +856,7 @@ function renderUnit(unit) {
   plate.textContent = unit.name;
   card.appendChild(plate);
 
+  card.addEventListener("pointerdown", () => warmProfilePairImages(unit), { passive: true });
   card.addEventListener("click", event => {
     event.stopPropagation();
     if (suppressRoadmapClick || performance.now() < suppressTouchClickUntil) return;
@@ -869,7 +1001,7 @@ function tryIconFallback(img, unit) {
 }
 
 function openDrawer(unitId, segmentId = null) {
-  const unit = state.units.find(u => u.id === unitId);
+  const unit = unitByIdIndex.get(unitId) || state.units.find(u => u.id === unitId);
   if (!unit) return;
   activeUnitId = unit.id;
   closeDiamondPlanner();
@@ -1124,8 +1256,10 @@ function bindProfileTagTooltips(root) {
 
 function profileArtHtml(unit, typeLabel) {
   if (!unit) return `<div class="unit-profile-art empty"><div class="unit-profile-placeholder">?</div><span>${escapeHtml(typeLabel)}</span></div>`;
+  const warmed = unit.icon ? profileImageWarmCache.get(String(unit.icon).trim()) : null;
+  const decoding = warmed?.ready ? "sync" : "async";
   const image = unit.icon
-    ? `<img class="unit-profile-image" src="${escapeAttr(unit.icon)}" alt="${escapeAttr(unit.name)}" decoding="async"><div class="unit-profile-placeholder image-fallback">${escapeHtml(initials(unit.name))}</div>`
+    ? `<img class="unit-profile-image" src="${escapeAttr(unit.icon)}" alt="${escapeAttr(unit.name)}" width="200" height="200" decoding="${decoding}" loading="eager" fetchpriority="high" crossorigin="anonymous"><div class="unit-profile-placeholder image-fallback">${escapeHtml(initials(unit.name))}</div>`
     : `<div class="unit-profile-placeholder">${escapeHtml(initials(unit.name))}</div>`;
   return `<div class="unit-profile-art">${image}</div>`;
 }
@@ -1415,6 +1549,7 @@ function bindUnitProfileAdaptiveRows(root) {
 }
 
 function profileTimelineMsUnits() {
+  if (profileTimelineCache.length) return profileTimelineCache;
   return state.units
     .filter(isMs)
     .slice()
@@ -1482,7 +1617,7 @@ function profilePanelHeaderHtml(unit, label, emptyMessage) {
 }
 
 function openUnitProfile(unitId, activeSegmentId = null) {
-  const clicked = state.units.find(unit => unit.id === unitId);
+  const clicked = unitByIdIndex.get(unitId) || state.units.find(unit => unit.id === unitId);
   if (!clicked || (!isMs(clicked) && !isPilot(clicked))) return;
   hideTooltip(true);
   hideAppTooltip(true);
@@ -2436,7 +2571,7 @@ function overlappingUnits(unit) {
   return (state.units || []).filter(other => other.id !== unit.id && rectsOverlap(rect, iconRect(other)));
 }
 function bringUnitToFront(unitId, cardEl = null) {
-  const unit = state.units.find(u => u.id === unitId);
+  const unit = unitByIdIndex.get(unitId) || state.units.find(u => u.id === unitId);
   if (!unit) return;
   const overlaps = overlappingUnits(unit);
   if (!overlaps.length) return;
@@ -2465,7 +2600,7 @@ function refreshUnitZIndices() {
     card.style.zIndex = String(unitZIndex(unit, sameSlotOffset(unit)));
   });
 }
-function pairedMsForPilot(pilot) {
+function computePairedMsForPilot(pilot) {
   if (!isPilot(pilot)) return null;
   const sameWeek = state.units.filter(unit => isMs(unit) && normalizeWeek(unit.week) === normalizeWeek(pilot.week));
   if (!sameWeek.length) return null;
@@ -2481,16 +2616,89 @@ function pairedMsForPilot(pilot) {
     return aDistance - bDistance || visualStackRank(a) - visualStackRank(b) || a.name.localeCompare(b.name);
   })[0] || null;
 }
-function pairedPilotForMs(ms) {
+function computePairedPilotForMs(ms) {
   if (!isMs(ms)) return null;
   return state.units
     .filter(isPilot)
-    .filter(pilot => pairedMsForPilot(pilot)?.id === ms.id)
+    .filter(pilot => computePairedMsForPilot(pilot)?.id === ms.id)
     .sort((a, b) => {
       const aExact = sameVisualSlot(a, ms) ? 1 : 0;
       const bExact = sameVisualSlot(b, ms) ? 1 : 0;
       return bExact - aExact || (Number(a.stackOrder) || 0) - (Number(b.stackOrder) || 0) || a.name.localeCompare(b.name);
     })[0] || null;
+}
+function rebuildStaticRuntimeIndices() {
+  const units = state.units || [];
+  const msUnits = [];
+  const pilots = [];
+  const msByWeek = new Map();
+
+  unitByIdIndex = new Map();
+  pairedMsByPilotId = new Map();
+  pairedPilotByMsId = new Map();
+
+  for (const unit of units) {
+    unitByIdIndex.set(unit.id, unit);
+    if (isMs(unit)) {
+      msUnits.push(unit);
+      const week = normalizeWeek(unit.week);
+      if (!msByWeek.has(week)) msByWeek.set(week, []);
+      msByWeek.get(week).push(unit);
+    } else if (isPilot(unit)) {
+      pilots.push(unit);
+    }
+  }
+
+  const pilotsByMsId = new Map();
+  for (const pilot of pilots) {
+    const sameWeek = msByWeek.get(normalizeWeek(pilot.week)) || [];
+    const ms = sameWeek.length ? sameWeek.slice().sort((a, b) => {
+      const aExact = sameVisualSlot(a, pilot) ? 1 : 0;
+      const bExact = sameVisualSlot(b, pilot) ? 1 : 0;
+      if (aExact !== bExact) return bExact - aExact;
+      const aTier = a.tier === pilot.tier ? 1 : 0;
+      const bTier = b.tier === pilot.tier ? 1 : 0;
+      if (aTier !== bTier) return bTier - aTier;
+      const pilotPosition = tierIndex(pilot.tier) + normalizeRowOffset(pilot.rowOffset);
+      const aDistance = Math.abs(tierIndex(a.tier) + normalizeRowOffset(a.rowOffset) - pilotPosition);
+      const bDistance = Math.abs(tierIndex(b.tier) + normalizeRowOffset(b.rowOffset) - pilotPosition);
+      return aDistance - bDistance || visualStackRank(a) - visualStackRank(b) || a.name.localeCompare(b.name);
+    })[0] : null;
+    pairedMsByPilotId.set(pilot.id, ms || null);
+    if (ms) {
+      if (!pilotsByMsId.has(ms.id)) pilotsByMsId.set(ms.id, []);
+      pilotsByMsId.get(ms.id).push(pilot);
+    }
+  }
+
+  for (const ms of msUnits) {
+    const candidates = pilotsByMsId.get(ms.id) || [];
+    candidates.sort((a, b) => {
+      const aExact = sameVisualSlot(a, ms) ? 1 : 0;
+      const bExact = sameVisualSlot(b, ms) ? 1 : 0;
+      return bExact - aExact || (Number(a.stackOrder) || 0) - (Number(b.stackOrder) || 0) || a.name.localeCompare(b.name);
+    });
+    pairedPilotByMsId.set(ms.id, candidates[0] || null);
+  }
+
+  profileTimelineCache = msUnits.slice().sort((a, b) =>
+    normalizeWeek(a.week) - normalizeWeek(b.week)
+    || (tierIndex(a.tier) + normalizeRowOffset(a.rowOffset)) - (tierIndex(b.tier) + normalizeRowOffset(b.rowOffset))
+    || (Number(a.stackOrder) || 0) - (Number(b.stackOrder) || 0)
+    || a.name.localeCompare(b.name)
+    || a.id.localeCompare(b.id)
+  );
+}
+
+function pairedMsForPilot(pilot) {
+  if (!isPilot(pilot)) return null;
+  if (pairedMsByPilotId.has(pilot.id)) return pairedMsByPilotId.get(pilot.id) || null;
+  return computePairedMsForPilot(pilot);
+}
+function pairedPilotForMs(ms) {
+  if (!isMs(ms)) return null;
+  if (pairedPilotByMsId.has(ms.id)) return pairedPilotByMsId.get(ms.id) || null;
+  return computePairedPilotForMs(ms);
 }
 function metaOwnerForUnit(unit) { return isPilot(unit) ? (pairedMsForPilot(unit) || null) : unit; }
 function syncPilotLanes() {
@@ -2814,7 +3022,7 @@ function applyMetaFilters() {
   });
   els.roadmap?.querySelectorAll(".meta-owner-tether[data-unit-id], .meta-owner-node[data-unit-id], .lane-track[data-unit-id]").forEach(element => {
     const unitId = element.dataset.unitId;
-    const unit = state.units.find(candidate => candidate.id === unitId);
+    const unit = unitByIdIndex.get(unitId) || state.units.find(candidate => candidate.id === unitId);
     const unitMatches = !hasUnitFilters || unitFilters.has(unitId);
     const statusMatches = !hasStatusFilters || sortedVisibleSegments(unit).some(segment => activeMetaStatusFilters.has(segment.statusId));
     const matches = unitMatches && statusMatches;
@@ -2862,31 +3070,35 @@ function scheduleTouchGestureFrame() {
   if (touchGestureFrame) return;
   touchGestureFrame = requestAnimationFrame(flushTouchGestureFrame);
 }
+function applyPinchPreviewFrame(frame) {
+  if (!frame || !pinchGesture) return;
+  const nextZoom = clamp(Number(frame.zoom) || zoomScale, minimumZoom(), MAX_ZOOM);
+  const ratio = nextZoom / pinchGesture.startZoom;
+  const localX = frame.midpointX - pinchGesture.rectLeft;
+  const localY = frame.midpointY - pinchGesture.rectTop;
+  const maxScrollLeft = Math.max(0, pinchGesture.baseWidth * nextZoom - pinchGesture.viewportWidth);
+  const maxScrollTop = Math.max(0, pinchGesture.baseHeight * nextZoom - pinchGesture.viewportHeight);
+  const targetScrollLeft = clamp(pinchGesture.anchorStageX * ratio - localX, 0, maxScrollLeft);
+  const targetScrollTop = clamp(pinchGesture.anchorStageY * ratio - localY, 0, maxScrollTop);
+
+  // Live pinch is compositor-only: transform the already-rendered stage. The real
+  // roadmap scale, stage dimensions, scroll offsets, and semantic measurements are
+  // committed once the pinch ends.
+  const translateX = pinchGesture.startScrollLeft - targetScrollLeft;
+  const translateY = pinchGesture.startScrollTop - targetScrollTop;
+  els.chartStage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0) scale(${ratio})`;
+
+  pinchGesture.finalZoom = nextZoom;
+  pinchGesture.targetScrollLeft = targetScrollLeft;
+  pinchGesture.targetScrollTop = targetScrollTop;
+  if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(nextZoom * 100)}%`;
+}
 function flushTouchGestureFrame() {
   touchGestureFrame = 0;
   if (pendingTouchPinchFrame && pinchGesture) {
     const frame = pendingTouchPinchFrame;
     pendingTouchPinchFrame = null;
-    const nextZoom = clamp(Number(frame.zoom) || zoomScale, minimumZoom(), MAX_ZOOM);
-    const ratio = nextZoom / pinchGesture.startZoom;
-    const localX = frame.midpointX - pinchGesture.rectLeft;
-    const localY = frame.midpointY - pinchGesture.rectTop;
-    const maxScrollLeft = Math.max(0, pinchGesture.baseWidth * nextZoom - pinchGesture.viewportWidth);
-    const maxScrollTop = Math.max(0, pinchGesture.baseHeight * nextZoom - pinchGesture.viewportHeight);
-    const targetScrollLeft = clamp(pinchGesture.anchorStageX * ratio - localX, 0, maxScrollLeft);
-    const targetScrollTop = clamp(pinchGesture.anchorStageY * ratio - localY, 0, maxScrollTop);
-
-    // Live pinch is compositor-only: transform the already-rendered stage. The real
-    // roadmap scale, stage dimensions, scroll offsets, and semantic measurements are
-    // committed once the pinch ends.
-    const translateX = pinchGesture.startScrollLeft - targetScrollLeft;
-    const translateY = pinchGesture.startScrollTop - targetScrollTop;
-    els.chartStage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0) scale(${ratio})`;
-
-    pinchGesture.finalZoom = nextZoom;
-    pinchGesture.targetScrollLeft = targetScrollLeft;
-    pinchGesture.targetScrollTop = targetScrollTop;
-    if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(nextZoom * 100)}%`;
+    applyPinchPreviewFrame(frame);
     return;
   }
 
@@ -2950,20 +3162,18 @@ function commitTouchPinchVisual() {
   els.chartScroll.scrollLeft = targetScrollLeft;
   els.chartScroll.scrollTop = targetScrollTop;
 }
-function beginPinchGesture() {
-  const geometry = touchPairGeometry();
-  if (!geometry) return;
+function beginPinchGestureAt(midpointX, midpointY, distance = 1) {
   flushPendingTouchGestureFrame();
   clearTouchStageTransform();
 
   const rect = els.chartScroll.getBoundingClientRect();
-  const localX = geometry.midpointX - rect.left;
-  const localY = geometry.midpointY - rect.top;
+  const localX = midpointX - rect.left;
+  const localY = midpointY - rect.top;
   const startScrollLeft = els.chartScroll.scrollLeft;
   const startScrollTop = els.chartScroll.scrollTop;
   pinchGesture = {
-    startDistance: geometry.distance,
-    lastDistance: geometry.distance,
+    startDistance: Math.max(1, Number(distance) || 1),
+    lastDistance: Math.max(1, Number(distance) || 1),
     previewZoom: zoomScale,
     startZoom: zoomScale,
     startScrollLeft,
@@ -2982,10 +3192,76 @@ function beginPinchGesture() {
     moved: false
   };
   pendingTouchPinchFrame = null;
-  els.chartScroll.classList.add("touch-gesturing");
+  els.chartScroll.classList.add("touch-gesturing", "touch-pinching");
+}
+function beginPinchGesture() {
+  const geometry = touchPairGeometry();
+  if (!geometry) return;
+  beginPinchGestureAt(geometry.midpointX, geometry.midpointY, geometry.distance);
+}
+function markWebKitTouchActive(event) {
+  if (!useWebKitNativeGestureInput) return;
+  if ((event.touches?.length || 0) > 0) els.chartScroll.classList.add("touch-active");
+  else els.chartScroll.classList.remove("touch-active");
+}
+function clearWebKitTouchActive() {
+  if (!useWebKitNativeGestureInput) return;
+  els.chartScroll.classList.remove("touch-active");
+}
+
+function beginWebKitPinchGesture(event) {
+  if (!useWebKitNativeGestureInput || !isMobileTouchViewport()) return;
+  event.preventDefault();
+  suppressTouchClickUntil = performance.now() + 400;
+
+  // GestureEvent is independent of the PointerEvent stream that native scrolling
+  // may have cancelled. That lets WebKit keep its native single-finger momentum
+  // scroll while giving us a stable, target-independent pinch scale.
+  touchPoints.clear();
+  touchPanGesture = null;
+  pendingTouchPanFrame = null;
+  const scale = Math.max(0.001, Number(event.scale) || 1);
+  webKitPinchGesture = { lastScale: scale };
+  beginPinchGestureAt(Number(event.clientX) || innerWidth / 2, Number(event.clientY) || innerHeight / 2, 1);
+}
+function moveWebKitPinchGesture(event) {
+  if (!useWebKitNativeGestureInput || !webKitPinchGesture || !pinchGesture) return;
+  event.preventDefault();
+  const currentScale = Math.max(0.001, Number(event.scale) || webKitPinchGesture.lastScale || 1);
+  const previousScale = Math.max(0.001, Number(webKitPinchGesture.lastScale) || currentScale);
+  const factor = clamp(currentScale / previousScale, 0.5, 2);
+  webKitPinchGesture.lastScale = currentScale;
+  pinchGesture.previewZoom = clamp(
+    (Number(pinchGesture.previewZoom) || pinchGesture.startZoom) * factor,
+    minimumZoom(),
+    MAX_ZOOM
+  );
+  pinchGesture.moved = true;
+  suppressTouchClickUntil = performance.now() + 400;
+
+  // Apply the latest native gesture scale immediately. WebKit batches the style
+  // mutation for presentation; avoiding an extra rAF hop removes a frame of input
+  // latency on iOS, where web content may otherwise update less frequently than a
+  // 120 Hz native UIKit gesture.
+  applyPinchPreviewFrame({
+    zoom: pinchGesture.previewZoom,
+    midpointX: Number(event.clientX) || innerWidth / 2,
+    midpointY: Number(event.clientY) || innerHeight / 2
+  });
+}
+function endWebKitPinchGesture(event) {
+  if (!useWebKitNativeGestureInput || !webKitPinchGesture) return;
+  event.preventDefault();
+  webKitPinchGesture = null;
+  if (pinchGesture) commitTouchPinchVisual();
+  pinchGesture = null;
+  pendingTouchPinchFrame = null;
+  clearTouchStageTransform();
+  els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
+  suppressTouchClickUntil = performance.now() + 400;
 }
 function beginTouchGesture(event) {
-  if (event.pointerType !== "touch") return;
+  if (useWebKitNativeGestureInput || event.pointerType !== "touch") return;
   const point = { x: event.clientX, y: event.clientY };
   touchPoints.set(event.pointerId, point);
 
@@ -3015,7 +3291,7 @@ function beginTouchGesture(event) {
   event.preventDefault();
 }
 function moveTouchGesture(event) {
-  if (event.pointerType !== "touch" || !touchPoints.has(event.pointerId)) return;
+  if (useWebKitNativeGestureInput || event.pointerType !== "touch" || !touchPoints.has(event.pointerId)) return;
   const point = { x: event.clientX, y: event.clientY };
   touchPoints.set(event.pointerId, point);
 
@@ -3069,7 +3345,7 @@ function moveTouchGesture(event) {
   event.preventDefault();
 }
 function endTouchGesture(event) {
-  if (event.pointerType !== "touch" || !touchPoints.has(event.pointerId)) return;
+  if (useWebKitNativeGestureInput || event.pointerType !== "touch" || !touchPoints.has(event.pointerId)) return;
 
   if (pinchGesture) {
     flushPendingTouchGestureFrame();
@@ -3090,7 +3366,7 @@ function endTouchGesture(event) {
       if (survivor) {
         beginTouchPan(survivor[0], survivor[1], true);
       } else {
-        els.chartScroll.classList.remove("touch-gesturing");
+        els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
       }
       return;
     }
@@ -3106,7 +3382,7 @@ function endTouchGesture(event) {
     touchPoints.delete(event.pointerId);
     try { els.chartScroll.releasePointerCapture(event.pointerId); } catch {}
     clearTouchStageTransform();
-    els.chartScroll.classList.remove("touch-gesturing");
+    els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
     if (moved) suppressTouchClickUntil = performance.now() + 400;
     return;
   }
@@ -3117,7 +3393,7 @@ function endTouchGesture(event) {
     touchPanGesture = null;
     pendingTouchPanFrame = null;
     clearTouchStageTransform();
-    els.chartScroll.classList.remove("touch-gesturing");
+    els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
   }
 }
 
