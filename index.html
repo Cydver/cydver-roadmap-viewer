@@ -16,7 +16,7 @@
         <p id="summary" class="summary">Loading roadmap…</p>
       </section>
       <div class="viewer-controls">
-        <button id="btnOpenDiamondPlanner" class="viewer-utility-action viewer-utility-diamond" type="button" aria-controls="diamondPlanner" aria-expanded="false">Diamond Planner</button>
+        <button id="btnOpenPullCalculator" class="viewer-utility-action viewer-utility-calc" type="button" aria-controls="pullCalculator" aria-expanded="false">Pull Calc</button>
       </div>
     </header>
 
@@ -44,22 +44,70 @@
     </section>
   </main>
 
-  <aside id="diamondPlanner" class="diamond-planner-drawer hidden" aria-label="Personal diamond planner">
+  <aside id="pullCalculator" class="diamond-planner-drawer pull-calculator-drawer hidden" aria-label="Pull probability calculator">
     <div class="diamond-planner-head">
       <div>
-        <p class="eyebrow">Private · stored on this device</p>
-        <h2>Diamond Planner</h2>
+        <p class="eyebrow">Pickup probability</p>
+        <h2>Pull Calculator</h2>
       </div>
-      <button id="btnCloseDiamondPlanner" class="drawer-close" type="button" aria-label="Close diamond planner">×</button>
+      <button id="btnClosePullCalculator" class="drawer-close" type="button" aria-label="Close pull calculator">×</button>
     </div>
-    <div class="diamond-balance-field">
-      <label for="diamondBalance">Current diamonds</label>
-      <input id="diamondBalance" type="number" min="0" step="100" inputmode="numeric" />
+
+    <div class="pull-calc-rate-strip" aria-label="Calculator rates">
+      <span><b>300</b> Dia / Pull</span>
+      <span><b>1.5%</b> Pickup</span>
+      <span><b>4.5%</b> UR</span>
     </div>
-    <div id="diamondPlannerSummary" class="diamond-planner-summary"></div>
-    <div class="diamond-plan-columns"><span>Future MS pull</span><span>Planned spend</span><span>Balance</span></div>
-    <div id="diamondPlannerList" class="diamond-planner-list"></div>
-    <button id="btnClearDiamondPlanner" class="diamond-clear" type="button">Clear private plan</button>
+
+    <div class="pull-calc-inputs">
+      <label class="diamond-balance-field" for="pullCalcDiamonds">
+        <span>Diamonds</span>
+        <input id="pullCalcDiamonds" type="number" min="0" step="300" inputmode="numeric" value="0" />
+      </label>
+      <label class="pull-calc-target-field" for="pullCalcMsTarget">
+        <span>MS target</span>
+        <select id="pullCalcMsTarget">
+          <option value="0">None</option>
+          <option value="1">P0 · 1 copy</option>
+          <option value="2">P1 · 2 copies</option>
+          <option value="3">P2 · 3 copies</option>
+          <option value="4">P3 · 4 copies</option>
+          <option value="5">P4 · 5 copies</option>
+          <option value="6">P5 · 6 copies</option>
+        </select>
+      </label>
+      <label class="pull-calc-target-field" for="pullCalcPilotTarget">
+        <span>Pilot target</span>
+        <select id="pullCalcPilotTarget">
+          <option value="0">None</option>
+          <option value="1">P0 · 1 copy</option>
+          <option value="2">P1 · 2 copies</option>
+          <option value="3">P2 · 3 copies</option>
+          <option value="4">P3 · 4 copies</option>
+          <option value="5">P4 · 5 copies</option>
+          <option value="6">P5 · 6 copies</option>
+        </select>
+      </label>
+    </div>
+
+    <div id="pullCalcResult" class="pull-calc-result" aria-live="polite"></div>
+
+    <section class="pull-calc-breakdown" aria-labelledby="pullCalcBreakdownTitle">
+      <div class="pull-calc-breakdown-head">
+        <div>
+          <p class="eyebrow">Optimized allocation</p>
+          <h3 id="pullCalcBreakdownTitle">P-Level Chances</h3>
+        </div>
+        <div class="pull-calc-tabs" role="group" aria-label="Probability breakdown">
+          <button id="btnPullCalcMsBreakdown" type="button" aria-pressed="true">MS</button>
+          <button id="btnPullCalcPilotBreakdown" type="button" aria-pressed="false">Pilot</button>
+        </div>
+      </div>
+      <div id="pullCalcProbabilityList" class="pull-calc-probability-list"></div>
+    </section>
+
+    <p class="pull-calc-note">Rate-only estimate. The MS and Pilot use separate banners. The calculator automatically splits available pulls to maximize the chance of reaching both selected targets. The guaranteed 10th pull does not change the featured 1.5% pickup rate because UR remains 4.5%. Tickets, free pulls, and exchanges are not included.</p>
+    <button id="btnResetPullCalculator" class="diamond-clear" type="button">Reset calculator</button>
   </aside>
 
   <aside id="unitDrawer" class="unit-drawer hidden" aria-live="polite">

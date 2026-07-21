@@ -239,8 +239,10 @@ function warmProfilePairImages(unit) {
     if (entry) decodeProfileWarmEntry(entry);
   }
 }
-const DIAMOND_PLANNER_STORAGE_KEY = "uceDiamondPlannerV1";
-let diamondPlanner = { balance: 0, spends: {} };
+const PULL_CALCULATOR_STORAGE_KEY = "ucePullCalculatorV1";
+const PULL_COST_DIAMONDS = 300;
+const PICKUP_RATE = 0.015;
+let pullCalculator = { diamonds: 0, msCopies: 1, pilotCopies: 1, breakdown: "ms" };
 
 const els = {
   roadmap: document.getElementById("roadmap"),
@@ -260,17 +262,21 @@ const els = {
   drawer: document.getElementById("unitDrawer"),
   drawerContent: document.getElementById("drawerContent"),
   tooltip: document.getElementById("tooltip"),
-  planner: document.getElementById("diamondPlanner"),
-  plannerList: document.getElementById("diamondPlannerList"),
-  plannerBalance: document.getElementById("diamondBalance"),
-  plannerSummary: document.getElementById("diamondPlannerSummary")
+  pullCalculator: document.getElementById("pullCalculator"),
+  pullCalcDiamonds: document.getElementById("pullCalcDiamonds"),
+  pullCalcMsTarget: document.getElementById("pullCalcMsTarget"),
+  pullCalcPilotTarget: document.getElementById("pullCalcPilotTarget"),
+  pullCalcResult: document.getElementById("pullCalcResult"),
+  pullCalcProbabilityList: document.getElementById("pullCalcProbabilityList"),
+  pullCalcMsBreakdown: document.getElementById("btnPullCalcMsBreakdown"),
+  pullCalcPilotBreakdown: document.getElementById("btnPullCalcPilotBreakdown")
 };
 
 document.addEventListener("DOMContentLoaded", init);
 
 async function init() {
   tooltipEl = els.tooltip;
-  loadDiamondPlanner();
+  loadPullCalculator();
   bindControls();
 
   // Catalog data is useful for optional Altema backfill, but it is not required to
@@ -290,9 +296,9 @@ function bindControls() {
   document.addEventListener("keydown", () => { lastInputModality = "keyboard"; }, { capture: true });
   document.addEventListener("pointerdown", event => { lastInputModality = event.pointerType || "pointer"; }, { capture: true });
   document.getElementById("btnCloseDrawer").addEventListener("click", closeDrawer);
-  document.getElementById("btnOpenDiamondPlanner")?.addEventListener("click", openDiamondPlanner);
-  document.getElementById("btnCloseDiamondPlanner")?.addEventListener("click", closeDiamondPlanner);
-  document.getElementById("btnClearDiamondPlanner")?.addEventListener("click", clearDiamondPlanner);
+  document.getElementById("btnOpenPullCalculator")?.addEventListener("click", openPullCalculator);
+  document.getElementById("btnClosePullCalculator")?.addEventListener("click", closePullCalculator);
+  document.getElementById("btnResetPullCalculator")?.addEventListener("click", resetPullCalculator);
   els.customUnitFilterButton?.addEventListener("click", enterCustomUnitFilterMode);
   els.customUnitFilterSaveButton?.addEventListener("click", saveCustomUnitFilter);
   els.customUnitFilterClearButton?.addEventListener("click", clearCustomUnitFilterDraft);
@@ -301,18 +307,30 @@ function bindControls() {
   els.chartScroll?.addEventListener("dragstart", event => {
     if (event.target.closest?.(".unit-card img")) event.preventDefault();
   });
-  els.plannerBalance?.addEventListener("input", () => {
-    diamondPlanner.balance = Math.max(0, Math.round(Number(els.plannerBalance.value) || 0));
-    saveDiamondPlanner();
-    renderDiamondPlanner();
+  els.pullCalcDiamonds?.addEventListener("input", () => {
+    pullCalculator.diamonds = Math.max(0, Math.floor(Number(els.pullCalcDiamonds.value) || 0));
+    savePullCalculator();
+    renderPullCalculator();
   });
+  els.pullCalcMsTarget?.addEventListener("change", () => {
+    pullCalculator.msCopies = clampPullTarget(els.pullCalcMsTarget.value);
+    savePullCalculator();
+    renderPullCalculator();
+  });
+  els.pullCalcPilotTarget?.addEventListener("change", () => {
+    pullCalculator.pilotCopies = clampPullTarget(els.pullCalcPilotTarget.value);
+    savePullCalculator();
+    renderPullCalculator();
+  });
+  els.pullCalcMsBreakdown?.addEventListener("click", () => setPullCalculatorBreakdown("ms"));
+  els.pullCalcPilotBreakdown?.addEventListener("click", () => setPullCalculatorBreakdown("pilot"));
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     if (customUnitFilterEditing) { cancelCustomUnitFilterMode(); return; }
     if (unitNoteReaderOverlay) { closeUnitNoteReader(); return; }
     if (unitProfileOverlay) { closeUnitProfile(); return; }
     closeDrawer();
-    closeDiamondPlanner();
+    closePullCalculator();
     hideTooltip(true);
   });
   document.addEventListener("pointerdown", (event) => {
@@ -664,7 +682,7 @@ function renderAll() {
   renderLegend();
   renderChart();
   applyZoom();
-  renderDiamondPlanner();
+  if (!els.pullCalculator?.classList.contains("hidden")) renderPullCalculator();
   updateCustomUnitFilterControls();
 }
 
@@ -1004,7 +1022,7 @@ function openDrawer(unitId, segmentId = null) {
   const unit = unitByIdIndex.get(unitId) || state.units.find(u => u.id === unitId);
   if (!unit) return;
   activeUnitId = unit.id;
-  closeDiamondPlanner();
+  closePullCalculator();
   els.drawerContent.innerHTML = unitDetailHtml(unit, segmentId);
   els.drawer.classList.remove("hidden");
   renderChart();
@@ -1053,55 +1071,182 @@ function unitDetailHtml(unit, activeSegmentId = null) {
   `;
 }
 
-function loadDiamondPlanner() {
+function clampPullTarget(value) {
+  return Math.max(0, Math.min(6, Math.round(Number(value) || 0)));
+}
+
+function loadPullCalculator() {
   try {
-    const raw = JSON.parse(localStorage.getItem(DIAMOND_PLANNER_STORAGE_KEY) || "null");
-    if (raw && typeof raw === "object") diamondPlanner = { balance: Math.max(0, Math.round(Number(raw.balance) || 0)), spends: raw.spends && typeof raw.spends === "object" ? raw.spends : {} };
-  } catch { diamondPlanner = { balance: 0, spends: {} }; }
+    const raw = JSON.parse(localStorage.getItem(PULL_CALCULATOR_STORAGE_KEY) || "null");
+    if (!raw || typeof raw !== "object") return;
+    pullCalculator = {
+      diamonds: Math.max(0, Math.floor(Number(raw.diamonds) || 0)),
+      msCopies: clampPullTarget(raw.msCopies ?? 1),
+      pilotCopies: clampPullTarget(raw.pilotCopies ?? 1),
+      breakdown: raw.breakdown === "pilot" ? "pilot" : "ms"
+    };
+  } catch {}
 }
-function saveDiamondPlanner() {
-  try { localStorage.setItem(DIAMOND_PLANNER_STORAGE_KEY, JSON.stringify(diamondPlanner)); } catch {}
+
+function savePullCalculator() {
+  try { localStorage.setItem(PULL_CALCULATOR_STORAGE_KEY, JSON.stringify(pullCalculator)); } catch {}
 }
-function openDiamondPlanner() {
+
+function openPullCalculator() {
   closeDrawer();
-  renderDiamondPlanner();
-  els.planner?.classList.remove("hidden");
-  document.getElementById("btnOpenDiamondPlanner")?.setAttribute("aria-expanded", "true");
+  renderPullCalculator();
+  els.pullCalculator?.classList.remove("hidden");
+  document.getElementById("btnOpenPullCalculator")?.setAttribute("aria-expanded", "true");
 }
-function closeDiamondPlanner() {
-  els.planner?.classList.add("hidden");
-  document.getElementById("btnOpenDiamondPlanner")?.setAttribute("aria-expanded", "false");
+
+function closePullCalculator() {
+  els.pullCalculator?.classList.add("hidden");
+  document.getElementById("btnOpenPullCalculator")?.setAttribute("aria-expanded", "false");
 }
-function clearDiamondPlanner() {
-  diamondPlanner = { balance: 0, spends: {} };
-  saveDiamondPlanner();
-  renderDiamondPlanner();
+
+function resetPullCalculator() {
+  pullCalculator = { diamonds: 0, msCopies: 1, pilotCopies: 1, breakdown: "ms" };
+  savePullCalculator();
+  renderPullCalculator();
 }
-function plannedSpend(unitId) { return Math.max(0, Math.round(Number(diamondPlanner.spends?.[unitId]) || 0)); }
-function formatDiamonds(value) { return Math.round(Number(value) || 0).toLocaleString("en-US"); }
-function renderDiamondPlanner() {
-  if (!els.plannerList || !els.plannerBalance || !els.plannerSummary) return;
-  if (document.activeElement !== els.plannerBalance) els.plannerBalance.value = String(diamondPlanner.balance || 0);
-  const units = state.units.filter(isMs).slice().sort((a,b) => normalizeWeek(a.week)-normalizeWeek(b.week) || tierIndex(a.tier)-tierIndex(b.tier) || a.name.localeCompare(b.name));
-  let running = diamondPlanner.balance || 0;
-  let total = 0;
-  els.plannerList.innerHTML = "";
-  units.forEach(unit => {
-    const spend = plannedSpend(unit.id); total += spend; running -= spend;
-    const row = document.createElement("div");
-    row.className = "diamond-plan-row";
-    row.innerHTML = `<div class="diamond-plan-main"><strong>${escapeHtml(unit.name)}</strong><small>${escapeHtml(formatWeek(unit.week))} · ${escapeHtml(tierById(unit.tier).label)}</small></div><label><span>Spend</span><input type="number" min="0" step="100" inputmode="numeric" value="${spend || ""}" aria-label="Planned diamond spend for ${escapeAttr(unit.name)}"></label><div class="diamond-plan-balance${running < 0 ? " negative" : ""}">${formatDiamonds(running)}</div>`;
-    const input = row.querySelector("input");
-    input.addEventListener("change", () => {
-      const value = Math.max(0, Math.round(Number(input.value) || 0));
-      if (value) diamondPlanner.spends[unit.id] = value; else delete diamondPlanner.spends[unit.id];
-      saveDiamondPlanner();
-      renderDiamondPlanner();
-    });
-    els.plannerList.appendChild(row);
-  });
-  const remaining = (diamondPlanner.balance || 0) - total;
-  els.plannerSummary.innerHTML = `<div class="diamond-summary-stat"><span>Planned</span><strong>${formatDiamonds(total)}</strong></div><div class="diamond-summary-stat"><span>Remaining</span><strong class="${remaining < 0 ? "negative" : ""}">${formatDiamonds(remaining)}</strong></div>`;
+
+function setPullCalculatorBreakdown(kind) {
+  pullCalculator.breakdown = kind === "pilot" ? "pilot" : "ms";
+  savePullCalculator();
+  renderPullCalculator();
+}
+
+function binomialAtLeast(pulls, copies, rate = PICKUP_RATE) {
+  const n = Math.max(0, Math.floor(Number(pulls) || 0));
+  const k = Math.max(0, Math.floor(Number(copies) || 0));
+  if (k <= 0) return 1;
+  if (n < k || rate <= 0) return 0;
+  if (rate >= 1) return 1;
+
+  const miss = 1 - rate;
+  let probability = Math.pow(miss, n);
+  let cumulativeBelowTarget = probability;
+  for (let successes = 1; successes < k; successes++) {
+    probability *= ((n - successes + 1) / successes) * (rate / miss);
+    cumulativeBelowTarget += probability;
+  }
+  return Math.max(0, Math.min(1, 1 - cumulativeBelowTarget));
+}
+
+function optimizePullAllocation(totalPulls, msCopies, pilotCopies) {
+  const pulls = Math.max(0, Math.floor(Number(totalPulls) || 0));
+  const msGoal = clampPullTarget(msCopies);
+  const pilotGoal = clampPullTarget(pilotCopies);
+  if (!msGoal && !pilotGoal) return { msPulls: 0, pilotPulls: 0, probability: 1 };
+  if (!msGoal) return { msPulls: 0, pilotPulls: pulls, probability: binomialAtLeast(pulls, pilotGoal) };
+  if (!pilotGoal) return { msPulls: pulls, pilotPulls: 0, probability: binomialAtLeast(pulls, msGoal) };
+
+  let best = { msPulls: 0, pilotPulls: pulls, probability: -1 };
+  const evaluate = (msPulls) => {
+    const pilotPulls = pulls - msPulls;
+    const probability = binomialAtLeast(msPulls, msGoal) * binomialAtLeast(pilotPulls, pilotGoal);
+    if (probability > best.probability + 1e-15) {
+      best = { msPulls, pilotPulls, probability };
+    } else if (Math.abs(probability - best.probability) <= 1e-15) {
+      // Prefer the more balanced split when two allocations are mathematically tied.
+      const currentBalance = Math.abs(best.msPulls - best.pilotPulls);
+      const nextBalance = Math.abs(msPulls - pilotPulls);
+      if (nextBalance < currentBalance) best = { msPulls, pilotPulls, probability };
+    }
+  };
+
+  // Typical player balances are only a few hundred pulls, so an exact integer
+  // search is cheap. For pathological inputs, sample first and exactly refine
+  // around the best sampled split so typing a huge number cannot lock the UI.
+  if (pulls <= 25000) {
+    for (let msPulls = 0; msPulls <= pulls; msPulls++) evaluate(msPulls);
+  } else {
+    const stride = Math.max(1, Math.ceil(pulls / 5000));
+    for (let msPulls = 0; msPulls <= pulls; msPulls += stride) evaluate(msPulls);
+    evaluate(pulls);
+    const center = best.msPulls;
+    const from = Math.max(0, center - stride * 2);
+    const to = Math.min(pulls, center + stride * 2);
+    for (let msPulls = from; msPulls <= to; msPulls++) evaluate(msPulls);
+  }
+  return best;
+}
+
+function formatProbability(probability) {
+  const pct = Math.max(0, Math.min(1, Number(probability) || 0)) * 100;
+  if (pct > 0 && pct < 0.001) return "<0.001%";
+  if (pct < 1) return `${pct.toFixed(3)}%`;
+  if (pct < 99.999) return `${pct.toFixed(2)}%`;
+  if (pct < 100) return ">99.999%";
+  return "100%";
+}
+
+function pullTargetLabel(copies) {
+  const count = clampPullTarget(copies);
+  return count ? `P${count - 1}` : "None";
+}
+
+function pullGoalLabel(msCopies, pilotCopies) {
+  const pieces = [];
+  if (msCopies) pieces.push(`MS ${pullTargetLabel(msCopies)}`);
+  if (pilotCopies) pieces.push(`Pilot ${pullTargetLabel(pilotCopies)}`);
+  return pieces.length ? pieces.join(" + ") : "No target selected";
+}
+
+function pullAllocationStat(label, pulls) {
+  const diamonds = pulls * PULL_COST_DIAMONDS;
+  return `<div class="pull-calc-stat"><span>${escapeHtml(label)}</span><strong>${Number(pulls).toLocaleString("en-US")}</strong><small>${Number(diamonds).toLocaleString("en-US")} Dia</small></div>`;
+}
+
+function renderPullProbabilityBreakdown(kind, allocation) {
+  if (!els.pullCalcProbabilityList) return;
+  const isPilotBreakdown = kind === "pilot";
+  const pulls = isPilotBreakdown ? allocation.pilotPulls : allocation.msPulls;
+  const target = isPilotBreakdown ? pullCalculator.pilotCopies : pullCalculator.msCopies;
+  const rows = [];
+  for (let copies = 1; copies <= 6; copies++) {
+    const probability = binomialAtLeast(pulls, copies);
+    const pct = Math.max(0, Math.min(100, probability * 100));
+    const targetClass = copies === target ? " target" : "";
+    rows.push(`
+      <div class="pull-probability-row${targetClass}">
+        <div class="pull-probability-level"><strong>P${copies - 1}</strong><span>${copies} ${copies === 1 ? "copy" : "copies"}</span></div>
+        <div class="pull-probability-meter" aria-hidden="true"><i style="width:${pct.toFixed(4)}%"></i></div>
+        <strong class="pull-probability-value">${formatProbability(probability)}</strong>
+      </div>`);
+  }
+  els.pullCalcProbabilityList.innerHTML = `<div class="pull-probability-context"><span>${isPilotBreakdown ? "Pilot" : "MS"} · chance to reach at least each level</span><strong>${pulls.toLocaleString("en-US")} pulls</strong></div>${rows.join("")}`;
+}
+
+function renderPullCalculator() {
+  if (!els.pullCalculator || !els.pullCalcDiamonds || !els.pullCalcResult) return;
+  if (document.activeElement !== els.pullCalcDiamonds) els.pullCalcDiamonds.value = String(pullCalculator.diamonds || 0);
+  if (els.pullCalcMsTarget) els.pullCalcMsTarget.value = String(clampPullTarget(pullCalculator.msCopies));
+  if (els.pullCalcPilotTarget) els.pullCalcPilotTarget.value = String(clampPullTarget(pullCalculator.pilotCopies));
+
+  const totalPulls = Math.floor((pullCalculator.diamonds || 0) / PULL_COST_DIAMONDS);
+  const unusedDiamonds = (pullCalculator.diamonds || 0) - totalPulls * PULL_COST_DIAMONDS;
+  const allocation = optimizePullAllocation(totalPulls, pullCalculator.msCopies, pullCalculator.pilotCopies);
+  const hasGoal = pullCalculator.msCopies > 0 || pullCalculator.pilotCopies > 0;
+  const goalProbability = hasGoal ? allocation.probability : 1;
+
+  els.pullCalcResult.innerHTML = `
+    <div class="pull-calc-goal">
+      <span>Chance to reach ${escapeHtml(pullGoalLabel(pullCalculator.msCopies, pullCalculator.pilotCopies))}</span>
+      <strong>${hasGoal ? formatProbability(goalProbability) : "—"}</strong>
+      <small>${hasGoal ? "Best split across the two pickup banners" : "Choose an MS or Pilot target above"}</small>
+    </div>
+    <div class="pull-calc-stats">
+      ${pullAllocationStat("Available pulls", totalPulls)}
+      ${pullAllocationStat("MS pulls", allocation.msPulls)}
+      ${pullAllocationStat("Pilot pulls", allocation.pilotPulls)}
+    </div>
+    ${unusedDiamonds ? `<div class="pull-calc-unused">${unusedDiamonds.toLocaleString("en-US")} Dia remains below the 300-Diamond cost of one pull.</div>` : ""}`;
+
+  const breakdown = pullCalculator.breakdown === "pilot" ? "pilot" : "ms";
+  els.pullCalcMsBreakdown?.setAttribute("aria-pressed", String(breakdown === "ms"));
+  els.pullCalcPilotBreakdown?.setAttribute("aria-pressed", String(breakdown === "pilot"));
+  renderPullProbabilityBreakdown(breakdown, allocation);
 }
 
 window.__ucePlaceholder = function(name) {
@@ -1622,7 +1767,7 @@ function openUnitProfile(unitId, activeSegmentId = null) {
   hideTooltip(true);
   hideAppTooltip(true);
   closeDrawer();
-  closeDiamondPlanner();
+  closePullCalculator();
   closeUnitProfile(true);
 
   const ms = isMs(clicked) ? clicked : pairedMsForPilot(clicked);
