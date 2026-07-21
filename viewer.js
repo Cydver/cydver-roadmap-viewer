@@ -76,6 +76,7 @@ let metaOwnerHoverId = null;
 let metaOwnerFocusId = null;
 let tooltipEl = null;
 let tooltipPinned = false;
+let tooltipAnchorEl = null;
 let unitProfileOverlay = null;
 let profileReturnFocus = null;
 let unitNoteReaderOverlay = null;
@@ -84,6 +85,7 @@ let unitProfileOverflowObserver = null;
 let unitProfileLayoutObserver = null;
 let appTooltipEl = null;
 let appTooltipPinned = false;
+let appTooltipAnchorEl = null;
 let panDrag = null;
 let suppressRoadmapClick = false;
 const touchPoints = new Map();
@@ -786,22 +788,22 @@ function bindAppTooltip(element, htmlFactory) {
   if (!element) return;
   element.addEventListener("pointerenter", (event) => {
     if (event.pointerType === "touch") return;
-    showAppTooltip(event, htmlFactory, false);
+    showAppTooltip(event, htmlFactory, false, element);
   });
   element.addEventListener("pointermove", (event) => {
     if (event.pointerType === "touch" || appTooltipPinned) return;
-    if (!appTooltipEl) showAppTooltip(event, htmlFactory, false);
-    else positionAppTooltip(appTooltipEl, event);
+    if (!appTooltipEl) showAppTooltip(event, htmlFactory, false, element);
+    else positionAppTooltip(appTooltipEl, event, appTooltipAnchorEl || element);
   });
   element.addEventListener("pointerleave", () => { if (!appTooltipPinned) hideAppTooltip(); });
   element.addEventListener("click", (event) => {
     if (window.matchMedia?.("(hover: hover) and (pointer: fine)")?.matches) return;
     event.stopPropagation();
-    showAppTooltip(event, htmlFactory, true);
+    showAppTooltip(event, htmlFactory, true, element);
   });
 }
 
-function showAppTooltip(event, htmlFactory, pin = false) {
+function showAppTooltip(event, htmlFactory, pin = false, anchorEl = null) {
   hideAppTooltip(true);
   const html = typeof htmlFactory === "function" ? htmlFactory() : String(htmlFactory || "");
   if (!html) return;
@@ -810,27 +812,113 @@ function showAppTooltip(event, htmlFactory, pin = false) {
   appTooltipEl.innerHTML = html;
   document.body.appendChild(appTooltipEl);
   appTooltipPinned = !!pin;
-  positionAppTooltip(appTooltipEl, event);
+  appTooltipAnchorEl = anchorEl instanceof Element ? anchorEl : (event?.currentTarget instanceof Element ? event.currentTarget : null);
+  positionAppTooltip(appTooltipEl, event, appTooltipAnchorEl);
 }
 
-function positionAppTooltip(element, event) {
-  if (!element || !event) return;
+function tooltipIntersectionArea(a, b) {
+  const width = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left));
+  const height = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+  return width * height;
+}
+function tooltipOwnerId(anchorEl) {
+  return anchorEl?.dataset?.id || anchorEl?.dataset?.unitId || null;
+}
+function tooltipPlacementOrder(anchorEl, anchorRect) {
+  const ownerId = tooltipOwnerId(anchorEl);
+  if (ownerId && els.roadmap?.contains(anchorEl)) {
+    if (anchorEl.classList.contains("unit-card")) {
+      const lane = els.roadmap.querySelector(`.lane-track[data-unit-id="${CSS.escape(ownerId)}"]`);
+      const laneRect = lane?.getBoundingClientRect();
+      if (laneRect) return laneRect.top + laneRect.height / 2 >= anchorRect.top + anchorRect.height / 2
+        ? ["top", "right", "left", "bottom"]
+        : ["bottom", "right", "left", "top"];
+    }
+    if (anchorEl.classList.contains("meta-bar")) {
+      const card = els.roadmap.querySelector(`.unit-card[data-id="${CSS.escape(ownerId)}"]`);
+      const cardRect = card?.getBoundingClientRect();
+      if (cardRect) return cardRect.top + cardRect.height / 2 <= anchorRect.top + anchorRect.height / 2
+        ? ["bottom", "right", "left", "top"]
+        : ["top", "right", "left", "bottom"];
+    }
+  }
+  return ["right", "left", "bottom", "top"];
+}
+function tooltipObstacleRects(anchorEl) {
+  if (!anchorEl || !els.roadmap?.contains(anchorEl)) return [];
+  const ownerId = tooltipOwnerId(anchorEl);
+  const nodes = els.roadmap.querySelectorAll(".unit-card,.meta-bar,.meta-link,.meta-owner-tether,.meta-owner-node");
+  return Array.from(nodes).filter(node => node !== anchorEl).map(node => {
+    const rect = node.getBoundingClientRect();
+    const sameOwner = ownerId && (node.dataset.id === ownerId || node.dataset.unitId === ownerId);
+    let weight = node.classList.contains("meta-bar") ? 8 : node.classList.contains("unit-card") ? 7 : node.classList.contains("meta-link") ? 4 : 3;
+    if (sameOwner) weight += 6;
+    return { rect, weight };
+  }).filter(item => item.rect.width > 0 && item.rect.height > 0);
+}
+function positionSmartTooltip(element, event, anchorEl = null, maxWidth = 360) {
+  if (!element) return;
   const margin = 12;
-  const offset = 16;
+  const gap = element.classList.contains("unit-tooltip-card") ? 30 : 18;
   const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
   const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-  element.style.maxWidth = `${Math.max(180, Math.min(360, viewportWidth - margin * 2))}px`;
-  const rect = element.getBoundingClientRect();
-  const clientX = Number.isFinite(event.clientX) ? event.clientX : viewportWidth / 2;
-  const clientY = Number.isFinite(event.clientY) ? event.clientY : viewportHeight / 2;
-  let left = clientX + offset;
-  let top = clientY + offset;
-  if (left + rect.width + margin > viewportWidth) left = clientX - rect.width - offset;
-  if (top + rect.height + margin > viewportHeight) top = clientY - rect.height - offset;
-  left = Math.min(Math.max(left, margin), Math.max(margin, viewportWidth - rect.width - margin));
-  top = Math.min(Math.max(top, margin), Math.max(margin, viewportHeight - rect.height - margin));
-  element.style.left = `${Math.round(left)}px`;
-  element.style.top = `${Math.round(top)}px`;
+  element.style.maxWidth = `${Math.max(180, Math.min(maxWidth, viewportWidth - margin * 2))}px`;
+  const tooltipRect = element.getBoundingClientRect();
+  const clientX = Number.isFinite(event?.clientX) ? event.clientX : viewportWidth / 2;
+  const clientY = Number.isFinite(event?.clientY) ? event.clientY : viewportHeight / 2;
+  const reference = anchorEl instanceof Element && anchorEl.isConnected ? anchorEl : null;
+  const anchorRect = reference?.getBoundingClientRect() || { left: clientX, right: clientX, top: clientY, bottom: clientY, width: 0, height: 0 };
+  const order = tooltipPlacementOrder(reference, anchorRect);
+  const obstacles = tooltipObstacleRects(reference);
+  const maxLeft = Math.max(margin, viewportWidth - tooltipRect.width - margin);
+  const maxTop = Math.max(margin, viewportHeight - tooltipRect.height - margin);
+  const candidates = order.map((placement, preferenceIndex) => {
+    let left = anchorRect.left + (anchorRect.width - tooltipRect.width) / 2;
+    let top = anchorRect.top + (anchorRect.height - tooltipRect.height) / 2;
+    if (placement === "right") left = anchorRect.right + gap;
+    if (placement === "left") left = anchorRect.left - tooltipRect.width - gap;
+    if (placement === "bottom") top = anchorRect.bottom + gap;
+    if (placement === "top") top = anchorRect.top - tooltipRect.height - gap;
+    const rawLeft = left;
+    const rawTop = top;
+    // Keep the preview on the chosen side, but let it slide farther outward when
+    // doing so clears real roadmap content. This is the equivalent of a
+    // collision-aware "shift" step rather than merely flipping at viewport edges.
+    for (let pass = 0; pass < 4; pass++) {
+      const probe = { left, top, right: left + tooltipRect.width, bottom: top + tooltipRect.height };
+      let nextLeft = left;
+      let nextTop = top;
+      for (const obstacle of obstacles) {
+        if (!tooltipIntersectionArea(probe, obstacle.rect)) continue;
+        if (placement === "top") nextTop = Math.min(nextTop, obstacle.rect.top - gap - tooltipRect.height);
+        else if (placement === "bottom") nextTop = Math.max(nextTop, obstacle.rect.bottom + gap);
+        else if (placement === "left") nextLeft = Math.min(nextLeft, obstacle.rect.left - gap - tooltipRect.width);
+        else if (placement === "right") nextLeft = Math.max(nextLeft, obstacle.rect.right + gap);
+      }
+      if (nextLeft === left && nextTop === top) break;
+      left = nextLeft;
+      top = nextTop;
+    }
+    left = clamp(left, margin, maxLeft);
+    top = clamp(top, margin, maxTop);
+    const candidateRect = { left, top, right: left + tooltipRect.width, bottom: top + tooltipRect.height };
+    let score = preferenceIndex * 900 + (Math.abs(left - rawLeft) + Math.abs(top - rawTop)) * 12;
+    const anchorOverlap = tooltipIntersectionArea(candidateRect, anchorRect);
+    if (anchorOverlap) score += 2_000_000 + anchorOverlap * 20;
+    for (const obstacle of obstacles) {
+      const area = tooltipIntersectionArea(candidateRect, obstacle.rect);
+      if (area) score += obstacle.weight * (1200 + area);
+    }
+    return { left, top, placement, score };
+  });
+  candidates.sort((a, b) => a.score - b.score);
+  const best = candidates[0];
+  element.dataset.placement = best.placement;
+  element.style.left = `${Math.round(best.left)}px`;
+  element.style.top = `${Math.round(best.top)}px`;
+}
+function positionAppTooltip(element, event, anchorEl = null) {
+  positionSmartTooltip(element, event, anchorEl, 360);
 }
 
 function hideAppTooltip(force = false) {
@@ -838,6 +926,7 @@ function hideAppTooltip(force = false) {
   appTooltipEl?.remove();
   appTooltipEl = null;
   appTooltipPinned = false;
+  appTooltipAnchorEl = null;
 }
 
 
@@ -880,7 +969,7 @@ function bindProfileAltemaTooltips(root) {
     const tooltipHtml = () => `<strong>See on Altema</strong>`;
     const showSourceTooltip = event => {
       if (suppressUntilPointerLeaves) return;
-      showAppTooltip(event, tooltipHtml, false);
+      showAppTooltip(event, tooltipHtml, false, link);
       appTooltipEl?.classList.add("unit-profile-source-tooltip");
     };
     link.addEventListener("pointerenter", event => {
@@ -890,7 +979,7 @@ function bindProfileAltemaTooltips(root) {
     link.addEventListener("pointermove", event => {
       if (event.pointerType === "touch" || appTooltipPinned || suppressUntilPointerLeaves) return;
       if (!appTooltipEl) showSourceTooltip(event);
-      else positionAppTooltip(appTooltipEl, event);
+      else positionAppTooltip(appTooltipEl, event, link);
     });
     link.addEventListener("pointerleave", () => {
       suppressUntilPointerLeaves = false;
@@ -967,14 +1056,14 @@ function bindProfileMetaTooltips(root) {
     bindAppTooltip(label, htmlFactory);
     label.addEventListener("focus", () => {
       const rect = label.getBoundingClientRect();
-      showAppTooltip({ clientX: rect.left + rect.width / 2, clientY: rect.bottom }, htmlFactory, true);
+      showAppTooltip({ clientX: rect.left + rect.width / 2, clientY: rect.bottom }, htmlFactory, true, label);
     });
     label.addEventListener("blur", () => hideAppTooltip(true));
     label.addEventListener("keydown", event => {
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       const rect = label.getBoundingClientRect();
-      showAppTooltip({ clientX: rect.left + rect.width / 2, clientY: rect.bottom }, htmlFactory, true);
+      showAppTooltip({ clientX: rect.left + rect.width / 2, clientY: rect.bottom }, htmlFactory, true, label);
     });
   });
 }
@@ -1336,43 +1425,27 @@ function closeUnitProfile(immediate = false) {
 function showTooltip(event, unit, activeSegment = null, options = {}) {
   const shouldPin = !!options.pin;
   if (tooltipPinned && !shouldPin) return;
+  hideAppTooltip(true);
   const metaUnit = metaOwnerForUnit(unit);
   const activeId = metaUnit ? (activeSegment?.id || metaUnit.segments?.[0]?.id || null) : null;
   tooltipEl.innerHTML = tooltipHtml(unit, activeId);
   tooltipEl.classList.add("unit-tooltip-card");
   tooltipEl.classList.remove("hidden");
   tooltipPinned = shouldPin;
+  tooltipAnchorEl = options.anchor instanceof Element ? options.anchor : (event?.currentTarget instanceof Element ? event.currentTarget : null);
   tooltipEl.classList.toggle("pinned", tooltipPinned);
   moveTooltip(event, true);
 }
 
 function moveTooltip(event, force = false) {
   if (!tooltipEl || tooltipEl.classList.contains("hidden") || (tooltipPinned && !force)) return;
-  const margin = 12;
-  const offset = 16;
-  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
-  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-  tooltipEl.style.maxWidth = `${Math.max(180, Math.min(360, viewportWidth - margin * 2))}px`;
-  const rect = tooltipEl.getBoundingClientRect();
-  const maxLeft = Math.max(margin, viewportWidth - rect.width - margin);
-  const maxTop = Math.max(margin, viewportHeight - rect.height - margin);
-  let x = Number(event?.clientX);
-  let y = Number(event?.clientY);
-  if (!Number.isFinite(x)) x = viewportWidth / 2;
-  if (!Number.isFinite(y)) y = viewportHeight / 2;
-  let left = x + offset;
-  let top = y + offset;
-  if (left + rect.width + margin > viewportWidth) left = x - rect.width - offset;
-  if (top + rect.height + margin > viewportHeight) top = y - rect.height - offset;
-  left = Math.min(Math.max(left, margin), maxLeft);
-  top = Math.min(Math.max(top, margin), maxTop);
-  tooltipEl.style.left = `${Math.round(left)}px`;
-  tooltipEl.style.top = `${Math.round(top)}px`;
+  positionSmartTooltip(tooltipEl, event, tooltipAnchorEl, 360);
 }
 
 function hideTooltip(force = false) {
   if (tooltipPinned && !force) return;
   tooltipPinned = false;
+  tooltipAnchorEl = null;
   tooltipEl?.classList.add("hidden");
   tooltipEl?.classList.remove("pinned");
 }
@@ -1778,12 +1851,58 @@ function tierY(tierId) {
   }
   return y;
 }
+function betweenBoundaryMetaSafeHeight(tierId) {
+  const tiers = getTiers();
+  const index = tiers.findIndex(tier => tier.id === tierId);
+  const nextTier = index >= 0 ? tiers[index + 1] : null;
+  if (!nextTier) return 0;
+  const boundaryKey = `between:${tierId}|${nextTier.id}`;
+  const seenSlots = new Set();
+  let requiredHeight = 0;
+
+  for (const seed of state.units || []) {
+    if (rowSlotKey(seed) !== boundaryKey) continue;
+    const slotKey = visualSlotKey(seed);
+    if (seenSlots.has(slotKey)) continue;
+    seenSlots.add(slotKey);
+
+    const group = sameSlotGroup(seed);
+    const layout = slotLayoutForGroup(group);
+    const groupWidth = layout.groupWidth || ICON_W;
+    const groupHalfHeight = (layout.groupHeight || ICON_W) / 2;
+    const maxGroupLeft = Math.max(LEFT_W, baseChartWidth() - groupWidth);
+    const groupLeft = clamp(weekX(seed.week) + Math.round((weekWidth(seed.week) - groupWidth) / 2), LEFT_W, maxGroupLeft);
+    const groupRight = groupLeft + groupWidth;
+    const horizontalSafety = 8;
+    let lowestCrossingBarBottom = 0;
+
+    for (const owner of state.units || []) {
+      if (owner.tier !== tierId || !hasVisibleMetaSegments(owner)) continue;
+      const laneTop = dynamicBarTop(tierId) + ((Number(owner.lane) || 1) - 1) * BAR_GAP;
+      for (const segment of sortedVisibleSegments(owner)) {
+        const start = normalizeWeek(segment.start);
+        const end = normalizeWeek(segment.end);
+        const left = weekX(start) + META_BAR_EDGE_INSET;
+        const right = left + Math.max(4, weekSpanWidth(start, end) - META_BAR_EDGE_INSET * 2);
+        if (left < groupRight + horizontalSafety && right > groupLeft - horizontalSafety) {
+          lowestCrossingBarBottom = Math.max(lowestCrossingBarBottom, laneTop + BAR_H);
+        }
+      }
+    }
+
+    if (lowestCrossingBarBottom) {
+      requiredHeight = Math.max(requiredHeight, lowestCrossingBarBottom + groupHalfHeight + 12);
+    }
+  }
+  return requiredHeight;
+}
 function tierHeight(tierId) {
   const lanes = visibleLaneCount(tierId);
   const iconContentHeight = ICON_TOP + maxIconStackVisualHeight(tierId) + 28;
   const minHeight = Math.max(BLANK_TIER_H, iconContentHeight);
-  if (!lanes) return minHeight;
-  return Math.max(minHeight, dynamicBarTop(tierId) + lanes * BAR_GAP + BAR_BOTTOM_PAD);
+  const betweenSafeHeight = betweenBoundaryMetaSafeHeight(tierId);
+  if (!lanes) return Math.max(minHeight, betweenSafeHeight);
+  return Math.max(minHeight, dynamicBarTop(tierId) + lanes * BAR_GAP + BAR_BOTTOM_PAD, betweenSafeHeight);
 }
 function visibleLaneCount(tierId) {
   let maxLane = 0;
