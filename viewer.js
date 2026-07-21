@@ -1698,6 +1698,13 @@ function tierIndex(id) { return Math.max(0, getTiers().findIndex(t => t.id === i
 function metaStatus(id) { return getStatuses().find(s => s.id === id) || getStatuses()[2] || DEFAULT_META_STATUSES[2]; }
 function defaultMetaStatusId() { return getStatuses()[2]?.id || getStatuses()[0]?.id || "s3"; }
 function segmentColor(segment) { return metaStatus(segment.statusId).color; }
+function applyMetaOwnerColor(element, segment) {
+  if (!element || !segment) return;
+  const color = segmentColor(segment);
+  const rgb = parseHexColor(color) || [132, 224, 252];
+  element.style.setProperty("--meta-owner-color", color);
+  element.style.setProperty("--meta-owner-rgb", rgb.join(", "));
+}
 function wideWeekSet() {
   if (layoutGeometryCache.wideWeeks) return layoutGeometryCache.wideWeeks;
   const slots = new Map();
@@ -1895,6 +1902,7 @@ function metaOwnerTetherGeometry(unit) {
 function renderMetaOwnerTether(unit) {
   const geometry = metaOwnerTetherGeometry(unit);
   if (!geometry) return;
+  const firstSegment = sortedVisibleSegments(unit)[0];
   if (geometry.stemHeight > 1) {
     const stem = addDiv("meta-owner-tether stem", {
       left: `${geometry.anchorX}px`,
@@ -1903,6 +1911,7 @@ function renderMetaOwnerTether(unit) {
     });
     stem.dataset.unitId = unit.id;
     stem.setAttribute("aria-hidden", "true");
+    applyMetaOwnerColor(stem, firstSegment);
   }
   if (geometry.cardArmWidth > 1) {
     const cardArm = addDiv("meta-owner-tether arm card-arm", {
@@ -1912,6 +1921,7 @@ function renderMetaOwnerTether(unit) {
     });
     cardArm.dataset.unitId = unit.id;
     cardArm.setAttribute("aria-hidden", "true");
+    applyMetaOwnerColor(cardArm, firstSegment);
   }
   if (geometry.armWidth > 1) {
     const arm = addDiv("meta-owner-tether arm", {
@@ -1921,6 +1931,7 @@ function renderMetaOwnerTether(unit) {
     });
     arm.dataset.unitId = unit.id;
     arm.setAttribute("aria-hidden", "true");
+    applyMetaOwnerColor(arm, firstSegment);
   }
   const cardPort = addDiv("meta-owner-node card-port", {
     left: `${geometry.cardPortX}px`,
@@ -1928,6 +1939,7 @@ function renderMetaOwnerTether(unit) {
   });
   cardPort.dataset.unitId = unit.id;
   cardPort.setAttribute("aria-hidden", "true");
+  applyMetaOwnerColor(cardPort, firstSegment);
 
   const laneNode = addDiv("meta-owner-node lane-node", {
     left: `${geometry.laneNodeX}px`,
@@ -1935,6 +1947,7 @@ function renderMetaOwnerTether(unit) {
   });
   laneNode.dataset.unitId = unit.id;
   laneNode.setAttribute("aria-hidden", "true");
+  applyMetaOwnerColor(laneNode, firstSegment);
 }
 function setMetaOwnerHover(unitId) {
   metaOwnerHoverId = unitId || null;
