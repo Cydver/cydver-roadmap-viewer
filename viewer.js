@@ -22,6 +22,8 @@ const TAG_OPTIONS = ["PVP", "PVE", "Must P5", "Buff", "Core", "Tech", "Def", "Su
 const MAX_TAGS = 10;
 const TAGS_PER_COLUMN = 5;
 const MIN_ZOOM = 0.2;
+const MOBILE_MIN_ZOOM = 0.02;
+const TEXT_SCALE_MIN_ZOOM = 0.2;
 const MAX_ZOOM = 1.6;
 const ZOOM_BUTTON_STEP = 0.05;
 const TIER_LABEL_ABBREVIATIONS = { human: "HR", must: "MP", ideal: "IP", luxury: "LP", skip: "S" };
@@ -76,6 +78,7 @@ let customUnitFilterDraft = new Set();
 const metaFilterClickTimers = new Map();
 let metaOwnerHoverId = null;
 let metaOwnerFocusId = null;
+let metaOwnerProfileId = null;
 let metaOwnerHighlightedId = null;
 let metaFocusDimmerEl = null;
 let tooltipEl = null;
@@ -93,12 +96,9 @@ let appTooltipAnchorEl = null;
 let panDrag = null;
 let suppressRoadmapClick = false;
 const touchPoints = new Map();
-let touchPan = null;
 let pinchGesture = null;
 let touchGestureFrame = 0;
-let pendingTouchPanPoint = null;
 let pendingTouchPinchFrame = null;
-let touchZoomDirty = false;
 let suppressTouchClickUntil = 0;
 
 function createLayoutGeometryCache() {
@@ -228,7 +228,10 @@ function bindControls() {
   window.addEventListener("pointermove", moveTouchGesture, { passive: false });
   window.addEventListener("pointerup", endTouchGesture);
   window.addEventListener("pointercancel", endTouchGesture);
-  window.addEventListener("resize", () => applyZoom());
+  window.addEventListener("resize", () => {
+    zoomScale = clamp(zoomScale, minimumZoom(), MAX_ZOOM);
+    applyZoom();
+  });
 }
 
 async function loadRoadmap() {
@@ -519,6 +522,7 @@ function resolveIcon(unit) {
 function renderAll() {
   metaOwnerHoverId = null;
   metaOwnerFocusId = null;
+  metaOwnerProfileId = null;
   metaOwnerHighlightedId = null;
   metaFocusDimmerEl = null;
   renderSummary();
@@ -1463,6 +1467,7 @@ function openUnitProfile(unitId, activeSegmentId = null) {
 
   const ms = isMs(clicked) ? clicked : pairedMsForPilot(clicked);
   const pilot = isPilot(clicked) ? clicked : pairedPilotForMs(clicked);
+  setMetaOwnerProfile(ms?.id || null);
   const activeId = ms ? (activeSegmentId || ms.segments?.[0]?.id || null) : null;
   const { previous, next } = profileNavigationTargets(clicked, ms);
   profileReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -1538,6 +1543,7 @@ function closeUnitProfile(immediate = false) {
   unitProfileOverflowObserver?.disconnect();
   unitProfileOverflowObserver = null;
   if (!unitProfileOverlay) return;
+  const closingProfileOwnerId = metaOwnerProfileId;
   const overlay = unitProfileOverlay;
   if (overlay.classList.contains("closing") && !immediate) return;
   const returnFocus = profileReturnFocus;
@@ -1552,6 +1558,11 @@ function closeUnitProfile(immediate = false) {
     overlay.remove();
     if (!document.querySelector(".unit-profile-overlay")) document.body.classList.remove("unit-profile-open");
     if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
+    // Keep the owner highlighted through the close animation and focus restoration,
+    // then let the underlying hover/focus state take over without a one-frame flash.
+    requestAnimationFrame(() => {
+      if (!unitProfileOverlay && metaOwnerProfileId === closingProfileOwnerId) setMetaOwnerProfile(null);
+    });
   };
 
   if (immediate || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
@@ -1722,14 +1733,21 @@ function addDiv(className, style = {}) {
   return el;
 }
 
+function isMobileTouchViewport() {
+  return Boolean(window.matchMedia?.("(pointer: coarse)")?.matches);
+}
+function minimumZoom() {
+  return isMobileTouchViewport() ? MOBILE_MIN_ZOOM : MIN_ZOOM;
+}
+
 function setZoom(value) {
-  zoomScale = clamp(Math.round(Number(value || 1) * 100) / 100, MIN_ZOOM, MAX_ZOOM);
+  zoomScale = clamp(Math.round(Number(value || 1) * 100) / 100, minimumZoom(), MAX_ZOOM);
   applyZoom();
 }
 
 function setZoomAtClientPoint(value, clientX, clientY) {
   const oldZoom = zoomScale;
-  const nextZoom = clamp(Math.round(Number(value || 1) * 100) / 100, MIN_ZOOM, MAX_ZOOM);
+  const nextZoom = clamp(Math.round(Number(value || 1) * 100) / 100, minimumZoom(), MAX_ZOOM);
   if (Math.abs(nextZoom - oldZoom) < 0.0001) return;
   const rect = els.chartScroll.getBoundingClientRect();
   const localX = clientX - rect.left;
@@ -1768,7 +1786,10 @@ function applyZoom() {
 function fitToWidth() {
   const available = Math.max(240, els.chartScroll.clientWidth - 20);
   const scale = available / baseChartWidth();
-  setZoom(clamp(scale, MIN_ZOOM, 1.2));
+  // On touch/mobile, round fit-to-width downward so the full timeline actually
+  // fits instead of a nearest-percent round-up pushing the far edge offscreen.
+  const fittedScale = isMobileTouchViewport() ? Math.floor(scale * 100) / 100 : scale;
+  setZoom(clamp(fittedScale, minimumZoom(), 1.2));
 }
 
 function baseChartWidth() { return weekBoundaryX(weekCount()); }
@@ -2064,6 +2085,10 @@ function setMetaOwnerFocus(unitId) {
   metaOwnerFocusId = unitId || null;
   updateMetaOwnerHighlight();
 }
+function setMetaOwnerProfile(unitId) {
+  metaOwnerProfileId = unitId || null;
+  updateMetaOwnerHighlight();
+}
 function setMetaOwnerHighlightState(unitId, highlighted) {
   if (!els.roadmap || !unitId) return;
   const id = CSS.escape(unitId);
@@ -2074,7 +2099,7 @@ function setMetaOwnerHighlightState(unitId, highlighted) {
 }
 function updateMetaOwnerHighlight() {
   if (!els.roadmap) return;
-  const activeId = metaOwnerHoverId || metaOwnerFocusId || null;
+  const activeId = metaOwnerProfileId || metaOwnerHoverId || metaOwnerFocusId || null;
   if (activeId === metaOwnerHighlightedId) return;
   if (metaOwnerHighlightedId) setMetaOwnerHighlightState(metaOwnerHighlightedId, false);
   if (activeId) setMetaOwnerHighlightState(activeId, true);
@@ -2535,11 +2560,11 @@ function initials(name) {
   return parts.slice(0, 2).map(p => p[0]).join("").toUpperCase();
 }
 function legibleTextScale(scale = zoomScale) {
-  const normalized = clamp(Number(scale) || 1, MIN_ZOOM, MAX_ZOOM);
+  const normalized = clamp(Number(scale) || 1, TEXT_SCALE_MIN_ZOOM, MAX_ZOOM);
   return clamp(Math.pow(1 / normalized, 0.65), 1, 3);
 }
 function barLabelTextScale(scale = zoomScale) {
-  const normalized = clamp(Number(scale) || 1, MIN_ZOOM, MAX_ZOOM);
+  const normalized = clamp(Number(scale) || 1, TEXT_SCALE_MIN_ZOOM, MAX_ZOOM);
   return clamp(Math.pow(1 / normalized, 0.9), 1, 3.4);
 }
 function parseHexColor(value) {
@@ -2796,39 +2821,40 @@ function touchPairGeometry() {
     distance: Math.max(1, Math.hypot(b.x - a.x, b.y - a.y))
   };
 }
+function clearTouchStageTransform() {
+  if (!els.chartStage) return;
+  els.chartStage.style.transform = "";
+}
 function scheduleTouchGestureFrame() {
   if (touchGestureFrame) return;
   touchGestureFrame = requestAnimationFrame(flushTouchGestureFrame);
 }
 function flushTouchGestureFrame() {
   touchGestureFrame = 0;
+  if (!pendingTouchPinchFrame || !pinchGesture) return;
 
-  if (pendingTouchPinchFrame && pinchGesture) {
-    const frame = pendingTouchPinchFrame;
-    pendingTouchPinchFrame = null;
-    pendingTouchPanPoint = null;
-    const nextZoom = clamp(Number(frame.zoom) || zoomScale, MIN_ZOOM, MAX_ZOOM);
-    zoomScale = nextZoom;
-    els.roadmap.style.transform = `scale(${zoomScale})`;
-    els.chartStage.style.width = `${pinchGesture.baseWidth * zoomScale}px`;
-    els.chartStage.style.height = `${pinchGesture.baseHeight * zoomScale}px`;
-    if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
-    const localX = frame.midpointX - pinchGesture.rectLeft;
-    const localY = frame.midpointY - pinchGesture.rectTop;
-    els.chartScroll.scrollLeft = pinchGesture.contentX * zoomScale - localX;
-    els.chartScroll.scrollTop = pinchGesture.contentY * zoomScale - localY;
-    touchZoomDirty = true;
-    return;
-  }
+  const frame = pendingTouchPinchFrame;
+  pendingTouchPinchFrame = null;
+  const nextZoom = clamp(Number(frame.zoom) || zoomScale, minimumZoom(), MAX_ZOOM);
+  const ratio = nextZoom / pinchGesture.startZoom;
+  const localX = frame.midpointX - pinchGesture.rectLeft;
+  const localY = frame.midpointY - pinchGesture.rectTop;
+  const maxScrollLeft = Math.max(0, pinchGesture.baseWidth * nextZoom - els.chartScroll.clientWidth);
+  const maxScrollTop = Math.max(0, pinchGesture.baseHeight * nextZoom - els.chartScroll.clientHeight);
+  const targetScrollLeft = clamp(pinchGesture.anchorStageX * ratio - localX, 0, maxScrollLeft);
+  const targetScrollTop = clamp(pinchGesture.anchorStageY * ratio - localY, 0, maxScrollTop);
 
-  if (pendingTouchPanPoint && touchPan) {
-    const point = pendingTouchPanPoint;
-    pendingTouchPanPoint = null;
-    const dx = point.x - touchPan.startX;
-    const dy = point.y - touchPan.startY;
-    els.chartScroll.scrollLeft = touchPan.scrollLeft - dx;
-    els.chartScroll.scrollTop = touchPan.scrollTop - dy;
-  }
+  // Live pinch is compositor-only: transform the already-rendered stage. The real
+  // roadmap scale, stage dimensions, scroll offsets, and semantic measurements are
+  // committed once the pinch ends.
+  const translateX = pinchGesture.startScrollLeft - targetScrollLeft;
+  const translateY = pinchGesture.startScrollTop - targetScrollTop;
+  els.chartStage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0) scale(${ratio})`;
+
+  pinchGesture.finalZoom = nextZoom;
+  pinchGesture.targetScrollLeft = targetScrollLeft;
+  pinchGesture.targetScrollTop = targetScrollTop;
+  if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(nextZoom * 100)}%`;
 }
 function flushPendingTouchGestureFrame() {
   if (touchGestureFrame) {
@@ -2837,109 +2863,105 @@ function flushPendingTouchGestureFrame() {
   }
   flushTouchGestureFrame();
 }
-function commitTouchZoomPresentation() {
-  if (!touchZoomDirty) return;
-  touchZoomDirty = false;
+function commitTouchPinchVisual() {
+  if (!pinchGesture) return;
+  flushPendingTouchGestureFrame();
+  const nextZoom = clamp(Number(pinchGesture.finalZoom) || pinchGesture.startZoom, minimumZoom(), MAX_ZOOM);
+  const targetScrollLeft = Number.isFinite(pinchGesture.targetScrollLeft) ? pinchGesture.targetScrollLeft : pinchGesture.startScrollLeft;
+  const targetScrollTop = Number.isFinite(pinchGesture.targetScrollTop) ? pinchGesture.targetScrollTop : pinchGesture.startScrollTop;
+
+  clearTouchStageTransform();
+  zoomScale = nextZoom;
   applyZoom();
+  els.chartScroll.scrollLeft = targetScrollLeft;
+  els.chartScroll.scrollTop = targetScrollTop;
 }
 function beginPinchGesture() {
   const geometry = touchPairGeometry();
   if (!geometry) return;
   flushPendingTouchGestureFrame();
+  clearTouchStageTransform();
+
   const rect = els.chartScroll.getBoundingClientRect();
   const localX = geometry.midpointX - rect.left;
   const localY = geometry.midpointY - rect.top;
+  const startScrollLeft = els.chartScroll.scrollLeft;
+  const startScrollTop = els.chartScroll.scrollTop;
   pinchGesture = {
     startDistance: geometry.distance,
     startZoom: zoomScale,
-    contentX: (els.chartScroll.scrollLeft + localX) / zoomScale,
-    contentY: (els.chartScroll.scrollTop + localY) / zoomScale,
+    startScrollLeft,
+    startScrollTop,
+    anchorStageX: startScrollLeft + localX,
+    anchorStageY: startScrollTop + localY,
     rectLeft: rect.left,
     rectTop: rect.top,
     baseWidth: baseChartWidth(),
     baseHeight: baseChartHeight(),
+    finalZoom: zoomScale,
+    targetScrollLeft: startScrollLeft,
+    targetScrollTop: startScrollTop,
     moved: false
   };
-  pendingTouchPanPoint = null;
-  touchPan = null;
   els.chartScroll.classList.add("touch-gesturing");
 }
 function beginTouchGesture(event) {
   if (event.pointerType !== "touch") return;
   touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
-  try { els.chartScroll.setPointerCapture(event.pointerId); } catch {}
-  els.chartScroll.classList.add("touch-gesturing");
-  if (touchPoints.size >= 2) {
-    beginPinchGesture();
-    event.preventDefault();
-    return;
+
+  // One-finger dragging is deliberately left to the browser's native overflow
+  // scroller (touch-action: pan-x pan-y). That path can run asynchronously from
+  // JavaScript and is much smoother on mobile Safari/WebKit and Firefox/Android.
+  if (touchPoints.size < 2) return;
+
+  for (const pointerId of touchPoints.keys()) {
+    try { els.chartScroll.setPointerCapture(pointerId); } catch {}
   }
-  touchPan = {
-    pointerId: event.pointerId,
-    startX: event.clientX,
-    startY: event.clientY,
-    scrollLeft: els.chartScroll.scrollLeft,
-    scrollTop: els.chartScroll.scrollTop,
-    moved: false
-  };
+  beginPinchGesture();
+  event.preventDefault();
 }
 function moveTouchGesture(event) {
   if (event.pointerType !== "touch" || !touchPoints.has(event.pointerId)) return;
   touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  if (touchPoints.size < 2 || !pinchGesture) return;
 
-  if (touchPoints.size >= 2 && pinchGesture) {
-    const geometry = touchPairGeometry();
-    if (!geometry) return;
-    pendingTouchPinchFrame = {
-      zoom: pinchGesture.startZoom * (geometry.distance / pinchGesture.startDistance),
-      midpointX: geometry.midpointX,
-      midpointY: geometry.midpointY
-    };
-    pinchGesture.moved = true;
-    suppressTouchClickUntil = performance.now() + 400;
-    scheduleTouchGestureFrame();
-    event.preventDefault();
-    return;
-  }
-
-  if (!touchPan || event.pointerId !== touchPan.pointerId) return;
-  const dx = event.clientX - touchPan.startX;
-  const dy = event.clientY - touchPan.startY;
-  if (!touchPan.moved && Math.hypot(dx, dy) > 4) touchPan.moved = true;
-  if (!touchPan.moved) return;
-  pendingTouchPanPoint = { x: event.clientX, y: event.clientY };
+  const geometry = touchPairGeometry();
+  if (!geometry) return;
+  pendingTouchPinchFrame = {
+    zoom: pinchGesture.startZoom * (geometry.distance / pinchGesture.startDistance),
+    midpointX: geometry.midpointX,
+    midpointY: geometry.midpointY
+  };
+  pinchGesture.moved = true;
   suppressTouchClickUntil = performance.now() + 400;
   scheduleTouchGestureFrame();
   event.preventDefault();
 }
 function endTouchGesture(event) {
   if (event.pointerType !== "touch" || !touchPoints.has(event.pointerId)) return;
-  flushPendingTouchGestureFrame();
-  const moved = Boolean(touchPan?.moved || pinchGesture?.moved || touchZoomDirty);
+  const wasPinching = Boolean(pinchGesture);
+  if (wasPinching) flushPendingTouchGestureFrame();
   touchPoints.delete(event.pointerId);
   try { els.chartScroll.releasePointerCapture(event.pointerId); } catch {}
-  if (moved) suppressTouchClickUntil = performance.now() + 400;
 
-  if (touchPoints.size >= 2) {
-    beginPinchGesture();
+  if (wasPinching && touchPoints.size < 2) {
+    const moved = Boolean(pinchGesture?.moved);
+    commitTouchPinchVisual();
+    pinchGesture = null;
+    pendingTouchPinchFrame = null;
+    clearTouchStageTransform();
+    els.chartScroll.classList.remove("touch-gesturing");
+    if (moved) suppressTouchClickUntil = performance.now() + 400;
+    // A surviving finger can simply lift and start a fresh native one-finger pan;
+    // do not keep it captured in a JavaScript drag loop.
+    for (const pointerId of touchPoints.keys()) {
+      try { els.chartScroll.releasePointerCapture(pointerId); } catch {}
+    }
     return;
   }
-  pinchGesture = null;
-  pendingTouchPinchFrame = null;
-  if (touchPoints.size === 1) {
-    const [pointerId, point] = touchPoints.entries().next().value;
-    touchPan = {
-      pointerId,
-      startX: point.x,
-      startY: point.y,
-      scrollLeft: els.chartScroll.scrollLeft,
-      scrollTop: els.chartScroll.scrollTop,
-      moved: false
-    };
-  } else {
-    touchPan = null;
-    pendingTouchPanPoint = null;
-    commitTouchZoomPresentation();
+
+  if (!touchPoints.size) {
+    clearTouchStageTransform();
     els.chartScroll.classList.remove("touch-gesturing");
   }
 }

@@ -618,7 +618,7 @@ h1 {
   cursor: grab;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
-  touch-action: none;
+  touch-action: pan-x pan-y;
 }
 .chart-scroll.panning,
 .chart-scroll.panning * {
@@ -3204,4 +3204,77 @@ body {
   .unit-profile-ms-panel,
   .unit-profile-pilot-primary { padding: 18px 16px; }
   .unit-profile-ms-note-cell { padding-left: 16px; padding-right: 16px; }
+}
+
+/* --- Mobile roadmap gesture compositor + compact portrait legend --- */
+.chart-scroll.touch-gesturing .roadmap {
+  will-change: auto;
+}
+.chart-scroll.touch-gesturing .chart-stage {
+  will-change: transform;
+  backface-visibility: hidden;
+}
+
+@media (max-width: 820px), (max-height: 600px) and (pointer: coarse) {
+  /* The mobile Full Profile itself already scrolls, so PVP Notes do not need a
+     second clipped preview + Full Notes reader layer. */
+  .unit-profile-pvp-notes[data-note-reader="true"] .unit-profile-note-scroll {
+    max-height: none;
+    overflow: visible;
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+  .unit-profile-pvp-notes .unit-profile-note-expand {
+    display: none !important;
+  }
+}
+
+@media (max-width: 520px) and (pointer: coarse) {
+  /* Portrait phones: show every meta status without a hidden horizontal tail.
+     Dots preserve the status color while taking far less width than bar swatches. */
+  .legend-panel {
+    overflow: visible;
+  }
+  .legend-wrap {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 6px 8px;
+  }
+  .legend-title {
+    grid-column: 1;
+    padding-top: 0;
+  }
+  .legend-filter-controls {
+    grid-column: 2;
+    width: auto;
+    margin-left: 0;
+    flex-wrap: nowrap;
+  }
+  .legend-wrap > .legend {
+    grid-column: 1 / -1;
+    order: initial;
+    min-width: 0;
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    overflow: visible;
+    gap: 4px;
+  }
+  .legend-item {
+    flex: 0 0 auto;
+    gap: 4px;
+    padding: 4px 6px;
+    font-size: 9px;
+    line-height: 1.1;
+  }
+  .legend-swatch,
+  .legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    border-width: 1px;
+    background: var(--legend-color, #47a9ff);
+    box-shadow: 0 0 0 1px rgba(255,255,255,.12);
+  }
 }
