@@ -53,13 +53,6 @@
       <button id="btnClosePullCalculator" class="drawer-close" type="button" aria-label="Close pull calculator">×</button>
     </div>
 
-    <div class="pull-calc-rate-strip" aria-label="Calculator rates">
-      <span><b>300</b> Dia / Pull</span>
-      <span><b>1.5%</b> Pickup</span>
-      <span><b>4.5%</b> UR</span>
-      <span><b>200</b> Pull Pity</span>
-    </div>
-
     <div class="pull-calc-inputs">
       <label class="diamond-balance-field" for="pullCalcDiamonds">
         <span>Diamonds</span>
@@ -82,7 +75,6 @@
         <label class="pull-calc-ticket-field" for="pullCalcMsTickets">
           <span>MS tickets</span>
           <input id="pullCalcMsTickets" type="number" min="0" step="1" inputmode="numeric" value="0" />
-          <small>Usable on this pickup banner</small>
         </label>
         <label class="pull-calc-pity-field" for="pullCalcMsPity">
           <input id="pullCalcMsPity" type="checkbox" checked />
@@ -106,7 +98,6 @@
         <label class="pull-calc-ticket-field" for="pullCalcPilotTickets">
           <span>Pilot tickets</span>
           <input id="pullCalcPilotTickets" type="number" min="0" step="1" inputmode="numeric" value="0" />
-          <small>Usable on this pickup banner</small>
         </label>
         <label class="pull-calc-pity-field" for="pullCalcPilotPity">
           <input id="pullCalcPilotPity" type="checkbox" checked />
@@ -131,7 +122,6 @@
       <div id="pullCalcProbabilityList" class="pull-calc-probability-list"></div>
     </section>
 
-    <p class="pull-calc-note">Rate model: 1.5% pickup per pull. MS and Pilot are separate banners, so their tickets and 200-pull pity counters are modeled separately. Enter only tickets usable on the corresponding pickup banner; entered tickets are treated as pulls toward that banner's 200-pull pity. Enabled pity adds one guaranteed pickup copy for each completed 200 pulls on that banner. The calculator searches Diamond allocations and selects the split with the highest chance of satisfying both targets. The guaranteed 10th pull does not change the featured 1.5% pickup rate because UR remains 4.5%.</p>
     <button id="btnResetPullCalculator" class="diamond-clear" type="button">Reset calculator</button>
   </aside>
 

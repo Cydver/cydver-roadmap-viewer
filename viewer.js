@@ -1295,9 +1295,9 @@ function pullGoalLabel(msCopies, pilotCopies) {
 
 function pullAllocationStat(label, totalPulls, diamondPulls, tickets, pityCopies = 0) {
   const parts = [];
-  if (diamondPulls) parts.push(`${Number(diamondPulls).toLocaleString("en-US")} paid`);
+  if (diamondPulls) parts.push(`${(Number(diamondPulls) * PULL_COST_DIAMONDS).toLocaleString("en-US")} Diamonds`);
   if (tickets) parts.push(`${Number(tickets).toLocaleString("en-US")} ticket${tickets === 1 ? "" : "s"}`);
-  if (!parts.length) parts.push("0 resources");
+  if (!parts.length) parts.push("0 pulls");
   if (pityCopies) parts.push(`+${pityCopies} pity`);
   return `<div class="pull-calc-stat"><span>${escapeHtml(label)}</span><strong>${Number(totalPulls).toLocaleString("en-US")}</strong><small>${escapeHtml(parts.join(" · "))}</small></div>`;
 }
@@ -1323,7 +1323,7 @@ function renderPullProbabilityBreakdown(kind, allocation) {
         <strong class="pull-probability-value">${formatProbability(probability)}</strong>
       </div>`);
   }
-  const resourceBits = [`${pulls.toLocaleString("en-US")} pulls`, `${diamondPulls.toLocaleString("en-US")} paid`, `${tickets.toLocaleString("en-US")} tickets`];
+  const resourceBits = [`${pulls.toLocaleString("en-US")} pulls`, `${(diamondPulls * PULL_COST_DIAMONDS).toLocaleString("en-US")} Diamonds`, `${tickets.toLocaleString("en-US")} tickets`];
   if (pityCopies) resourceBits.push(`+${pityCopies} pity ${pityCopies === 1 ? "copy" : "copies"}`);
   els.pullCalcProbabilityList.innerHTML = `<div class="pull-probability-context"><span>${isPilotBreakdown ? "Pilot" : "MS"} · chance to pull at least each level${usePity ? " · pity enabled" : ""}</span><strong>${escapeHtml(resourceBits.join(" · "))}</strong></div>${rows.join("")}`;
 }
