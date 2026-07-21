@@ -211,6 +211,18 @@ function bindControls() {
 }
 
 async function loadRoadmap() {
+  const privateResult = await readPrivateHashRoadmap();
+  if (privateResult.present) {
+    if (privateResult.roadmap) {
+      state = privateResult.roadmap;
+      setMessage("");
+    } else {
+      state = structuredClone(DEFAULT_STATE);
+      setMessage(privateResult.error || "Could not decrypt this private roadmap.");
+    }
+    return;
+  }
+
   const fromHash = readHashRoadmap();
   if (fromHash) {
     state = fromHash;
@@ -226,7 +238,7 @@ async function loadRoadmap() {
     setMessage("");
   } catch (error) {
     state = structuredClone(DEFAULT_STATE);
-    setMessage("No published roadmap data found. Use a builder share link with #roadmap=… to view private roadmap data.");
+    setMessage("No published roadmap data found. Open a private season link, use a legacy #roadmap=… share link, or publish data/roadmap.json.");
   }
 }
 
@@ -295,6 +307,54 @@ function catalogAltemaUrlForUnit(unit) {
   if (byIcon) return normalizeAltemaSourceUrl(byIcon, kind);
   const byName = catalogKindNameIndex.get(catalogKindNameKey(kind, unit.name));
   return byName ? normalizeAltemaSourceUrl(byName, kind) : "";
+}
+
+function validPrivateShareId(value) {
+  return /^[A-Za-z0-9_-]{8,32}$/.test(String(value || ""));
+}
+async function decompressPrivateRoadmap(bytes, compression) {
+  if (compression === "none") return bytes;
+  if (compression !== "gzip") throw new Error(`Unsupported compression: ${compression}`);
+  if (typeof DecompressionStream !== "function") throw new Error("This browser does not support gzip decompression required by this private roadmap.");
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+async function readPrivateHashRoadmap() {
+  const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+  const shareId = params.get("private");
+  if (!shareId) return { present: false, roadmap: null, error: "" };
+  try {
+    if (!validPrivateShareId(shareId)) throw new Error("Private share ID is invalid.");
+    if (!globalThis.crypto?.subtle) throw new Error("Private roadmap decryption requires a secure browser context (HTTPS or localhost).");
+    const keyBytes = base64urlToBytes(params.get("key") || "");
+    if (keyBytes.length !== 32) throw new Error("Private share key is missing or invalid.");
+    const response = await fetch(`data/private/${encodeURIComponent(shareId)}.uce.enc`, { cache: "no-store" });
+    if (!response.ok) {
+      if (response.status === 404) throw new Error(`Encrypted roadmap ${shareId}.uce.enc was not found in data/private/.`);
+      throw new Error(`Could not load encrypted roadmap (HTTP ${response.status}).`);
+    }
+    const envelope = JSON.parse(await response.text());
+    if (envelope?.format !== "gundam-uce-roadmap-private" || Number(envelope?.version) !== 1) throw new Error("Encrypted roadmap format is not supported.");
+    if (envelope.shareId !== shareId) throw new Error("Encrypted roadmap share ID does not match this link.");
+    if (envelope.cipher !== "AES-GCM-256") throw new Error("Encrypted roadmap cipher is not supported.");
+    const iv = base64urlToBytes(envelope.iv);
+    if (iv.length !== 12) throw new Error("Encrypted roadmap IV is invalid.");
+    const ciphertext = base64urlToBytes(envelope.data);
+    const key = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["decrypt"]);
+    const additionalData = new TextEncoder().encode(`gundam-uce-roadmap-private:v1:${shareId}`);
+    const decrypted = new Uint8Array(await crypto.subtle.decrypt({
+      name: "AES-GCM",
+      iv,
+      additionalData,
+      tagLength: 128
+    }, key, ciphertext));
+    const plainBytes = await decompressPrivateRoadmap(decrypted, envelope.compression || "none");
+    const json = JSON.parse(new TextDecoder().decode(plainBytes));
+    const roadmap = Array.isArray(json) ? { ...structuredClone(DEFAULT_STATE), units: json } : { ...structuredClone(DEFAULT_STATE), ...json };
+    return { present: true, roadmap, error: "" };
+  } catch (error) {
+    return { present: true, roadmap: null, error: `Could not open private roadmap: ${error.message}` };
+  }
 }
 
 function readHashRoadmap() {
@@ -2744,11 +2804,14 @@ function escapeHtml(text) {
   return String(text ?? "").replace(/[&<>'"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[ch]));
 }
 function escapeAttr(text) { return escapeHtml(text).replace(/`/g, "&#96;"); }
-function base64urlDecode(text) {
-  const padded = text.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((text.length + 3) % 4);
+function base64urlToBytes(text) {
+  const clean = String(text || "").trim();
+  const padded = clean.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((clean.length + 3) % 4);
   const binary = atob(padded);
-  const bytes = Uint8Array.from(binary, ch => ch.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
+  return Uint8Array.from(binary, ch => ch.charCodeAt(0));
+}
+function base64urlDecode(text) {
+  return new TextDecoder().decode(base64urlToBytes(text));
 }
 function formatDate(value) {
   const date = new Date(value);
