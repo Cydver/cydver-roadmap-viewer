@@ -93,6 +93,26 @@ const touchPoints = new Map();
 let touchPan = null;
 let pinchGesture = null;
 let suppressTouchClickUntil = 0;
+
+function createLayoutGeometryCache() {
+  return {
+    slotLayouts: new Map(),
+    visibleLaneCounts: new Map(),
+    maxIconStackHeights: new Map(),
+    dynamicBarTops: new Map(),
+    betweenSafeHeights: new Map(),
+    tierHeights: new Map(),
+    tierYs: new Map(),
+    iconXs: new Map(),
+    iconYs: new Map(),
+    iconRects: new Map(),
+    baseChartHeight: null
+  };
+}
+let layoutGeometryCache = createLayoutGeometryCache();
+function invalidateLayoutGeometryCache() {
+  layoutGeometryCache = createLayoutGeometryCache();
+}
 const DIAMOND_PLANNER_STORAGE_KEY = "uceDiamondPlannerV1";
 let diamondPlanner = { balance: 0, spends: {} };
 
@@ -262,6 +282,7 @@ function readHashRoadmap() {
 }
 
 function normalizeState() {
+  invalidateLayoutGeometryCache();
   const unitsBefore = Array.isArray(state.units) ? state.units : [];
   const maxWeek = maxUsedWeek(unitsBefore);
 
@@ -1574,7 +1595,11 @@ function fitToWidth() {
 }
 
 function baseChartWidth() { return weekBoundaryX(weekCount()); }
-function baseChartHeight() { return HEADER_H + getTiers().reduce((sum, t) => sum + tierHeight(t.id), 0); }
+function baseChartHeight() {
+  if (layoutGeometryCache.baseChartHeight != null) return layoutGeometryCache.baseChartHeight;
+  layoutGeometryCache.baseChartHeight = HEADER_H + getTiers().reduce((sum, t) => sum + tierHeight(t.id), 0);
+  return layoutGeometryCache.baseChartHeight;
+}
 function normalizeMonthWeekCount(value) { return Number(value) === 5 ? 5 : 4; }
 function getMonthWeeks() {
   const months = Array.isArray(state.months) && state.months.length ? state.months : DEFAULT_MONTHS;
@@ -1827,18 +1852,24 @@ function weekX(week) {
   return x;
 }
 function tierY(tierId) {
+  if (layoutGeometryCache.tierYs.has(tierId)) return layoutGeometryCache.tierYs.get(tierId);
   let y = HEADER_H;
   for (const tier of getTiers()) {
+    layoutGeometryCache.tierYs.set(tier.id, y);
     if (tier.id === tierId) return y;
     y += tierHeight(tier.id);
   }
   return y;
 }
 function betweenBoundaryMetaSafeHeight(tierId) {
+  if (layoutGeometryCache.betweenSafeHeights.has(tierId)) return layoutGeometryCache.betweenSafeHeights.get(tierId);
   const tiers = getTiers();
   const index = tiers.findIndex(tier => tier.id === tierId);
   const nextTier = index >= 0 ? tiers[index + 1] : null;
-  if (!nextTier) return 0;
+  if (!nextTier) {
+    layoutGeometryCache.betweenSafeHeights.set(tierId, 0);
+    return 0;
+  }
   const boundaryKey = `between:${tierId}|${nextTier.id}`;
   const seenSlots = new Set();
   let requiredHeight = 0;
@@ -1849,10 +1880,9 @@ function betweenBoundaryMetaSafeHeight(tierId) {
     if (seenSlots.has(slotKey)) continue;
     seenSlots.add(slotKey);
 
-    const group = sameSlotGroup(seed);
-    const layout = slotLayoutForGroup(group);
-    const groupWidth = layout.groupWidth || ICON_W;
-    const groupHalfHeight = (layout.groupHeight || ICON_W) / 2;
+    const slot = sameSlotOffset(seed);
+    const groupWidth = slot.groupWidth || ICON_W;
+    const groupHalfHeight = (slot.groupHeight || ICON_W) / 2;
     const maxGroupLeft = Math.max(LEFT_W, baseChartWidth() - groupWidth);
     const groupLeft = clamp(weekX(seed.week) + Math.round((weekWidth(seed.week) - groupWidth) / 2), LEFT_W, maxGroupLeft);
     const groupRight = groupLeft + groupWidth;
@@ -1877,21 +1907,28 @@ function betweenBoundaryMetaSafeHeight(tierId) {
       requiredHeight = Math.max(requiredHeight, lowestCrossingBarBottom + groupHalfHeight + 12);
     }
   }
+  layoutGeometryCache.betweenSafeHeights.set(tierId, requiredHeight);
   return requiredHeight;
 }
 function tierHeight(tierId) {
+  if (layoutGeometryCache.tierHeights.has(tierId)) return layoutGeometryCache.tierHeights.get(tierId);
   const lanes = visibleLaneCount(tierId);
   const iconContentHeight = ICON_TOP + maxIconStackVisualHeight(tierId) + 28;
   const minHeight = Math.max(BLANK_TIER_H, iconContentHeight);
   const betweenSafeHeight = betweenBoundaryMetaSafeHeight(tierId);
-  if (!lanes) return Math.max(minHeight, betweenSafeHeight);
-  return Math.max(minHeight, dynamicBarTop(tierId) + lanes * BAR_GAP + BAR_BOTTOM_PAD, betweenSafeHeight);
+  const value = !lanes
+    ? Math.max(minHeight, betweenSafeHeight)
+    : Math.max(minHeight, dynamicBarTop(tierId) + lanes * BAR_GAP + BAR_BOTTOM_PAD, betweenSafeHeight);
+  layoutGeometryCache.tierHeights.set(tierId, value);
+  return value;
 }
 function visibleLaneCount(tierId) {
+  if (layoutGeometryCache.visibleLaneCounts.has(tierId)) return layoutGeometryCache.visibleLaneCounts.get(tierId);
   let maxLane = 0;
   for (const unit of state.units || []) {
     if (unit.tier === tierId && hasVisibleMetaSegments(unit)) maxLane = Math.max(maxLane, Number(unit.lane) || 0);
   }
+  layoutGeometryCache.visibleLaneCounts.set(tierId, maxLane);
   return maxLane;
 }
 function laneY(unitOrTier, laneMaybe) {
@@ -1899,34 +1936,47 @@ function laneY(unitOrTier, laneMaybe) {
   const lane = typeof unitOrTier === "string" ? laneMaybe : unitOrTier.lane;
   return tierY(tier) + dynamicBarTop(tier) + (lane - 1) * BAR_GAP;
 }
-function dynamicBarTop(tierId) { return Math.max(BAR_TOP, ICON_TOP + maxIconStackVisualHeight(tierId) + 18); }
+function dynamicBarTop(tierId) {
+  if (layoutGeometryCache.dynamicBarTops.has(tierId)) return layoutGeometryCache.dynamicBarTops.get(tierId);
+  const value = Math.max(BAR_TOP, ICON_TOP + maxIconStackVisualHeight(tierId) + 18);
+  layoutGeometryCache.dynamicBarTops.set(tierId, value);
+  return value;
+}
 function maxIconStackVisualHeight(tierId) {
+  if (layoutGeometryCache.maxIconStackHeights.has(tierId)) return layoutGeometryCache.maxIconStackHeights.get(tierId);
   const seen = new Set();
-  const heights = [ICON_W];
+  let maxHeight = ICON_W;
   for (const unit of state.units || []) {
     if (unit.tier !== tierId) continue;
     const key = visualSlotKey(unit);
     if (seen.has(key)) continue;
     seen.add(key);
-    heights.push(slotGroupHeight(sameSlotGroup(unit)));
+    maxHeight = Math.max(maxHeight, sameSlotOffset(unit).groupHeight || ICON_W);
   }
-  return Math.max(...heights);
+  layoutGeometryCache.maxIconStackHeights.set(tierId, maxHeight);
+  return maxHeight;
 }
 function iconX(unit) {
+  if (layoutGeometryCache.iconXs.has(unit.id)) return layoutGeometryCache.iconXs.get(unit.id);
   const slot = sameSlotOffset(unit);
   const groupWidth = slot.groupWidth || ICON_W;
   const maxGroupLeft = Math.max(LEFT_W, baseChartWidth() - groupWidth);
   const groupLeft = clamp(weekX(unit.week) + Math.round((weekWidth(unit.week) - groupWidth) / 2), LEFT_W, maxGroupLeft);
-  return groupLeft + slot.x;
+  const value = groupLeft + slot.x;
+  layoutGeometryCache.iconXs.set(unit.id, value);
+  return value;
 }
 function iconY(unit) {
+  if (layoutGeometryCache.iconYs.has(unit.id)) return layoutGeometryCache.iconYs.get(unit.id);
   const slot = sameSlotOffset(unit);
   const size = slot.size || ICON_W;
   const rowOffset = normalizeRowOffset(unit.rowOffset);
   let top = tierY(unit.tier) + ICON_TOP + slot.y;
   if (rowOffset > 0) top = tierY(unit.tier) + tierHeight(unit.tier) - slot.groupHeight / 2 + slot.y;
   if (rowOffset < 0) top = tierY(unit.tier) - slot.groupHeight / 2 + slot.y;
-  return clamp(top, HEADER_H - size / 2, baseChartHeight() - size);
+  const value = clamp(top, HEADER_H - size / 2, baseChartHeight() - size);
+  layoutGeometryCache.iconYs.set(unit.id, value);
+  return value;
 }
 function normalizeWeek(n) {
   const fallbackWeeks = Math.max(1, Math.ceil(maxUsedWeek(state.units || []) / 4) * 4, (state.months?.length || 3) * 4);
@@ -2029,11 +2079,25 @@ function slotLayoutForGroup(group) {
   return { layout, groupHeight: Math.max(ICON_W, y - ICON_STACK_GAP), groupWidth: ICON_W, compact };
 }
 function sameSlotOffset(unit) {
-  const group = sameSlotGroup(unit);
-  if (group.length <= 1) return { x: 0, y: 0, z: 0, index: 0, count: 1, groupHeight: ICON_W, groupWidth: ICON_W, size: ICON_W, compact: false };
-  const { layout, groupHeight, groupWidth, compact } = slotLayoutForGroup(group);
-  const slot = layout.get(unit.id) || { x: 0, y: 0, z: 0, index: 0, size: ICON_W };
-  return { ...slot, count: group.length, groupHeight, groupWidth, compact };
+  if (!unit) return { x: 0, y: 0, z: 0, index: 0, count: 1, groupHeight: ICON_W, groupWidth: ICON_W, size: ICON_W, compact: false };
+  const key = visualSlotKey(unit);
+  let cached = layoutGeometryCache.slotLayouts.get(key);
+  if (!cached) {
+    const group = sameSlotGroup(unit);
+    if (group.length <= 1) {
+      cached = { byId: new Map([[unit.id, { x: 0, y: 0, z: 0, index: 0, count: 1, groupHeight: ICON_W, groupWidth: ICON_W, size: ICON_W, compact: false }]]) };
+    } else {
+      const { layout, groupHeight, groupWidth, compact } = slotLayoutForGroup(group);
+      const byId = new Map();
+      group.forEach(member => {
+        const slot = layout.get(member.id) || { x: 0, y: 0, z: 0, index: 0, size: ICON_W };
+        byId.set(member.id, { ...slot, count: group.length, groupHeight, groupWidth, compact });
+      });
+      cached = { byId };
+    }
+    layoutGeometryCache.slotLayouts.set(key, cached);
+  }
+  return cached.byId.get(unit.id) || { x: 0, y: 0, z: 0, index: 0, count: 1, groupHeight: ICON_W, groupWidth: ICON_W, size: ICON_W, compact: false };
 }
 function slotGroupHeight(group) { return slotLayoutForGroup(group).groupHeight || ICON_W; }
 function unitZIndex(unit, slot = sameSlotOffset(unit)) {
@@ -2042,8 +2106,15 @@ function unitZIndex(unit, slot = sameSlotOffset(unit)) {
   return 20 + stack * 2 + (slot?.z || 0) + activeBoost;
 }
 function iconRect(unit) {
+  if (!unit) return { left: 0, top: 0, right: 0, bottom: 0 };
+  const cached = layoutGeometryCache.iconRects.get(unit.id);
+  if (cached) return cached;
   const size = sameSlotOffset(unit).size || ICON_W;
-  return { left: iconX(unit), top: iconY(unit), right: iconX(unit) + size, bottom: iconY(unit) + size };
+  const left = iconX(unit);
+  const top = iconY(unit);
+  const rect = { left, top, right: left + size, bottom: top + size };
+  layoutGeometryCache.iconRects.set(unit.id, rect);
+  return rect;
 }
 function rectsOverlap(a, b) { return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top; }
 function overlappingUnits(unit) {
