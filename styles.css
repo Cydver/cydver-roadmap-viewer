@@ -2981,3 +2981,81 @@ body {
   outline: calc(2px * var(--textBoost, 1)) solid rgba(216,246,255,.82);
   outline-offset: calc(3px * var(--textBoost, 1));
 }
+
+
+/* Viewer utility controls: compact opaque technical controls, aligned with Builder toolbar language. */
+.viewer-utility-action {
+  position: relative;
+  min-width: 0;
+  min-height: 32px;
+  height: 32px;
+  padding: 7px 11px 7px 28px !important;
+  border: 1px solid rgba(255,255,255,.105) !important;
+  border-radius: 6px !important;
+  background: rgba(255,255,255,.028) !important;
+  color: #dbe6f5 !important;
+  box-shadow: inset 2px 0 0 rgba(99,211,255,.28), inset 0 1px 0 rgba(255,255,255,.03) !important;
+  font-size: 12px;
+  font-weight: 850 !important;
+  letter-spacing: .025em;
+}
+.viewer-utility-action::before {
+  content: "";
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  color: #8bd7f4;
+  opacity: .82;
+  pointer-events: none;
+}
+.viewer-utility-filter::before {
+  width: 11px;
+  height: 10px;
+  transform: translateY(-50%);
+  background: currentColor;
+  clip-path: polygon(0 0, 100% 0, 62% 45%, 62% 100%, 38% 100%, 38% 45%);
+}
+.viewer-utility-diamond::before {
+  width: 8px;
+  height: 8px;
+  border: 1px solid currentColor;
+  background: transparent;
+  transform: translateY(-50%) rotate(45deg);
+}
+.viewer-utility-action:hover {
+  transform: translateY(-1px);
+  border-color: rgba(99,211,255,.28) !important;
+  background: rgba(99,211,255,.052) !important;
+  box-shadow: inset 2px 0 0 rgba(99,211,255,.55), inset 0 1px 0 rgba(255,255,255,.045), 0 5px 14px rgba(0,0,0,.14) !important;
+}
+.viewer-utility-action.active,
+.viewer-utility-action[aria-expanded="true"] {
+  color: #effbff !important;
+  border-color: rgba(99,211,255,.4) !important;
+  background: rgba(28,67,86,.58) !important;
+  box-shadow: inset 2px 0 0 rgba(99,211,255,.9), inset 0 1px 0 rgba(255,255,255,.055) !important;
+}
+.legend-filter-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 31px;
+  gap: 7px;
+  padding: 0 5px 0 2px;
+  color: #c7d5e5;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .055em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.legend-filter-status::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  background: #63d3ff;
+  box-shadow: 0 0 8px rgba(99,211,255,.34);
+}
+@media (max-width: 520px) {
+  .viewer-utility-action { flex: 0 0 auto !important; }
+  .legend-filter-status { flex: 1 1 100%; min-height: 24px; }
+}

@@ -151,6 +151,7 @@ const els = {
   chartScroll: document.getElementById("chartScroll"),
   legend: document.getElementById("statusLegend"),
   customUnitFilterButton: document.getElementById("btnCustomUnitFilter"),
+  customUnitFilterStatus: document.getElementById("customUnitFilterStatus"),
   customUnitFilterSaveButton: document.getElementById("btnSaveCustomUnitFilter"),
   customUnitFilterClearButton: document.getElementById("btnClearCustomUnitFilter"),
   customUnitFilterCancelButton: document.getElementById("btnCancelCustomUnitFilter"),
@@ -2709,10 +2710,15 @@ function toggleCustomUnitFilterDraft(unit) {
 function updateCustomUnitFilterControls() {
   const count = customUnitFilterEditing ? customUnitFilterDraft.size : activeMetaUnitFilters.size;
   if (els.customUnitFilterButton) {
-    els.customUnitFilterButton.textContent = customUnitFilterEditing ? `Selecting Units${count ? ` (${count})` : ""}` : `Filter Units${count ? ` (${count})` : ""}`;
-    els.customUnitFilterButton.classList.toggle("active", customUnitFilterEditing || count > 0);
-    els.customUnitFilterButton.setAttribute("aria-pressed", count > 0 ? "true" : "false");
+    els.customUnitFilterButton.textContent = `Filter Units${!customUnitFilterEditing && count ? ` (${count})` : ""}`;
+    els.customUnitFilterButton.classList.toggle("active", !customUnitFilterEditing && count > 0);
+    els.customUnitFilterButton.classList.toggle("hidden", customUnitFilterEditing);
+    els.customUnitFilterButton.setAttribute("aria-pressed", !customUnitFilterEditing && count > 0 ? "true" : "false");
     els.customUnitFilterButton.setAttribute("aria-expanded", customUnitFilterEditing ? "true" : "false");
+  }
+  if (els.customUnitFilterStatus) {
+    els.customUnitFilterStatus.textContent = `Selecting units · ${count ? `${count} selected` : "none selected"}`;
+    els.customUnitFilterStatus.classList.toggle("hidden", !customUnitFilterEditing);
   }
   els.customUnitFilterSaveButton?.classList.toggle("hidden", !customUnitFilterEditing);
   els.customUnitFilterClearButton?.classList.toggle("hidden", !customUnitFilterEditing);

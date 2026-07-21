@@ -16,7 +16,7 @@
         <p id="summary" class="summary">Loading roadmap…</p>
       </section>
       <div class="viewer-controls">
-        <button id="btnOpenDiamondPlanner" type="button" aria-controls="diamondPlanner" aria-expanded="false">Diamond Planner</button>
+        <button id="btnOpenDiamondPlanner" class="viewer-utility-action viewer-utility-diamond" type="button" aria-controls="diamondPlanner" aria-expanded="false">Diamond Planner</button>
       </div>
     </header>
 
@@ -25,7 +25,8 @@
         <div class="legend-title">Meta status <span>PVP only</span></div>
         <div id="statusLegend" class="legend"></div>
         <div class="legend-filter-controls" aria-label="Custom unit highlight filter">
-          <button id="btnCustomUnitFilter" type="button" aria-pressed="false" aria-expanded="false">Filter Units</button>
+          <button id="btnCustomUnitFilter" class="viewer-utility-action viewer-utility-filter" type="button" aria-pressed="false" aria-expanded="false">Filter Units</button>
+          <span id="customUnitFilterStatus" class="legend-filter-status hidden" aria-live="polite"></span>
           <button id="btnSaveCustomUnitFilter" class="hidden primary-action" type="button">Save</button>
           <button id="btnClearCustomUnitFilter" class="hidden" type="button">Clear</button>
           <button id="btnCancelCustomUnitFilter" class="hidden" type="button">Cancel</button>
