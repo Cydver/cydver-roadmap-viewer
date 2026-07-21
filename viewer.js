@@ -24,6 +24,8 @@ const TAGS_PER_COLUMN = 5;
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 1.6;
 const ZOOM_BUTTON_STEP = 0.05;
+const TIER_LABEL_ABBREVIATIONS = { human: "HR", must: "MP", ideal: "IP", luxury: "LP", skip: "S" };
+const CARD_DETAILS_MIN_VISUAL_SIZE = 116;
 const MUST_P5_TAG = "Must P5";
 const BUFF_TAG = "Buff";
 const TAG_ORDER = new Map(TAG_OPTIONS.map((tag, i) => [tag.toLowerCase(), i]));
@@ -429,7 +431,15 @@ function renderChart() {
       height: `${tierHeight(tier.id)}px`,
       color: tier.color
     });
-    label.textContent = tier.label;
+    label.dataset.fullLabel = tier.label;
+    label.dataset.tierId = tier.id;
+    const labelText = document.createElement("span");
+    labelText.className = "tier-label-text";
+    labelText.textContent = tier.label;
+    label.appendChild(labelText);
+    bindAppTooltip(label, () => label.dataset.abbreviated === "true"
+      ? `<strong>${escapeHtml(tier.label)}</strong>`
+      : "");
 
     const rail = addDiv("tier-accent-rail", {
       left: `${LEFT_W}px`,
@@ -797,8 +807,10 @@ function profileAltemaLinkHtml(unit) {
 
 function bindProfileAltemaTooltips(root) {
   root?.querySelectorAll("[data-profile-altema-link]").forEach(link => {
+    let suppressUntilPointerLeaves = false;
     const tooltipHtml = () => `<strong>See on Altema</strong>`;
     const showSourceTooltip = event => {
+      if (suppressUntilPointerLeaves) return;
       showAppTooltip(event, tooltipHtml, false);
       appTooltipEl?.classList.add("unit-profile-source-tooltip");
     };
@@ -807,17 +819,31 @@ function bindProfileAltemaTooltips(root) {
       showSourceTooltip(event);
     });
     link.addEventListener("pointermove", event => {
-      if (event.pointerType === "touch" || appTooltipPinned) return;
+      if (event.pointerType === "touch" || appTooltipPinned || suppressUntilPointerLeaves) return;
       if (!appTooltipEl) showSourceTooltip(event);
       else positionAppTooltip(appTooltipEl, event);
     });
-    link.addEventListener("pointerleave", () => hideAppTooltip(true));
+    link.addEventListener("pointerleave", () => {
+      suppressUntilPointerLeaves = false;
+      hideAppTooltip(true);
+    });
+    link.addEventListener("pointerdown", () => {
+      suppressUntilPointerLeaves = true;
+      hideAppTooltip(true);
+    });
     link.addEventListener("focus", () => {
+      if (suppressUntilPointerLeaves) return;
       const rect = link.getBoundingClientRect();
       showSourceTooltip({ clientX: rect.right, clientY: rect.top + rect.height / 2 });
     });
-    link.addEventListener("blur", () => hideAppTooltip(true));
-    link.addEventListener("click", () => hideAppTooltip(true));
+    link.addEventListener("blur", () => {
+      suppressUntilPointerLeaves = false;
+      hideAppTooltip(true);
+    });
+    link.addEventListener("click", () => {
+      suppressUntilPointerLeaves = true;
+      hideAppTooltip(true);
+    });
   });
 }
 
@@ -1417,6 +1443,7 @@ function applyZoom() {
   els.chartStage.style.width = `${width * zoomScale}px`;
   els.chartStage.style.height = `${height * zoomScale}px`;
   if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
+  updateAdaptiveRoadmapPresentation();
 }
 
 function fitToWidth() {
@@ -1863,6 +1890,52 @@ function legibleTextScale(scale = zoomScale) {
 function barLabelTextScale(scale = zoomScale) {
   const normalized = clamp(Number(scale) || 1, MIN_ZOOM, MAX_ZOOM);
   return clamp(Math.pow(1 / normalized, 0.9), 1, 3.4);
+}
+function compactTierLabel(fullLabel, tierId = "") {
+  const preset = TIER_LABEL_ABBREVIATIONS[tierId];
+  if (preset) return preset;
+  const words = sanitizeText(fullLabel).split(/[\s/|&+\-]+/).filter(Boolean);
+  if (words.length > 1) return words.slice(0, 4).map(word => word[0]).join("").toUpperCase();
+  const single = words[0] || sanitizeText(fullLabel);
+  return single.length > 4 ? single.slice(0, 4).toUpperCase() : single;
+}
+function updateAdaptiveTierLabels() {
+  if (!els.roadmap) return;
+  els.roadmap.querySelectorAll(".tier-label").forEach(label => {
+    const text = label.querySelector(".tier-label-text");
+    if (!text) return;
+    const fullLabel = label.dataset.fullLabel || text.textContent || "";
+    text.textContent = fullLabel;
+    label.dataset.abbreviated = "false";
+    label.removeAttribute("tabindex");
+    label.removeAttribute("aria-label");
+    const needsCompact = text.scrollWidth > text.clientWidth + 0.5;
+    if (!needsCompact) return;
+    text.textContent = compactTierLabel(fullLabel, label.dataset.tierId || "");
+    label.dataset.abbreviated = "true";
+    label.tabIndex = 0;
+    label.setAttribute("aria-label", fullLabel);
+  });
+}
+function updateUnitCardDetailVisibility() {
+  if (!els.roadmap) return;
+  els.roadmap.querySelectorAll(".unit-card").forEach(card => {
+    const cardRect = card.getBoundingClientRect();
+    const tags = card.querySelector(".tags");
+    const nameplate = card.querySelector(".nameplate");
+    const visualSize = Math.min(cardRect.width, cardRect.height);
+    let detailsCollide = false;
+    if (tags?.children.length && nameplate) {
+      const tagsRect = tags.getBoundingClientRect();
+      const nameRect = nameplate.getBoundingClientRect();
+      detailsCollide = tagsRect.bottom >= nameRect.top - 2;
+    }
+    card.classList.toggle("icon-only", visualSize < CARD_DETAILS_MIN_VISUAL_SIZE || detailsCollide);
+  });
+}
+function updateAdaptiveRoadmapPresentation() {
+  updateAdaptiveTierLabels();
+  updateUnitCardDetailVisibility();
 }
 function setMessage(text) {
   if (!text) {
