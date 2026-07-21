@@ -2633,6 +2633,24 @@ body {
 }
 .meta-link.meta-filter-selected { opacity: .95; }
 
+
+/* One-element focus dimmer: preserves strong ownership isolation without
+   restyling every unrelated meta mark on hover. */
+.meta-focus-dimmer {
+  position: absolute;
+  left: var(--left);
+  top: calc(var(--monthH) + var(--weekH));
+  right: 0;
+  bottom: 0;
+  z-index: 9;
+  pointer-events: none;
+  background: rgba(1, 5, 9, .62);
+  opacity: 0;
+  transition: opacity .1s ease-out;
+  contain: strict;
+}
+.meta-focus-dimmer.active { opacity: 1; }
+
 /* --- Meta ownership guidance: segmented tethers + focus isolation. --- */
 .lane-track {
   z-index: 5;
@@ -2659,6 +2677,7 @@ body {
   transition: opacity .14s ease, filter .14s ease;
 }
 .lane-track.meta-owner-highlight {
+  z-index: 11;
   background: linear-gradient(90deg, rgba(73,194,235,.02), rgba(73,194,235,.13) 9%, rgba(73,194,235,.105) 91%, rgba(73,194,235,.02));
   box-shadow:
     inset 0 calc(1px * var(--textBoost, 1)) rgba(178,237,255,.27),
@@ -2697,6 +2716,7 @@ body {
   box-shadow: 0 0 calc(3px * var(--textBoost, 1)) rgba(88,205,243,.11);
 }
 .meta-owner-tether.meta-owner-highlight {
+  z-index: 12;
   opacity: 1;
   background: rgba(211,249,255,.96);
   box-shadow:
@@ -2726,6 +2746,7 @@ body {
   transform: translate(-50%, -50%) rotate(45deg);
 }
 .meta-owner-node.meta-owner-highlight {
+  z-index: 13;
   background: #e9fbff;
   border-color: #f7feff;
   box-shadow:
@@ -2758,9 +2779,10 @@ body {
     0 0 0 calc(2px * var(--textBoost, 1)) rgba(233,251,255,.86),
     0 0 calc(12px * var(--textBoost, 1)) rgba(74,211,255,.4),
     inset 0 1px 0 rgba(255,255,255,.22);
-  z-index: 9;
+  z-index: 13;
 }
 .meta-link.meta-owner-highlight {
+  z-index: 12;
   opacity: 1;
   box-shadow:
     0 0 0 calc(1.5px * var(--textBoost, 1)) rgba(225,249,255,.62),

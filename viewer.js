@@ -75,6 +75,7 @@ const metaFilterClickTimers = new Map();
 let metaOwnerHoverId = null;
 let metaOwnerFocusId = null;
 let metaOwnerHighlightedId = null;
+let metaFocusDimmerEl = null;
 let tooltipEl = null;
 let tooltipPinned = false;
 let tooltipAnchorEl = null;
@@ -418,6 +419,7 @@ function renderAll() {
   metaOwnerHoverId = null;
   metaOwnerFocusId = null;
   metaOwnerHighlightedId = null;
+  metaFocusDimmerEl = null;
   renderSummary();
   renderLegend();
   renderChart();
@@ -534,6 +536,9 @@ function renderChart() {
       track.setAttribute("aria-hidden", "true");
     }
   });
+
+  metaFocusDimmerEl = addDiv("meta-focus-dimmer");
+  metaFocusDimmerEl.setAttribute("aria-hidden", "true");
 
   state.units
     .filter(hasVisibleMetaSegments)
@@ -716,9 +721,11 @@ function openDrawer(unitId, segmentId = null) {
 }
 
 function closeDrawer() {
+  const needsChartRefresh = activeUnitId !== null;
+  const wasOpen = !els.drawer.classList.contains("hidden");
   activeUnitId = null;
   els.drawer.classList.add("hidden");
-  renderChart();
+  if (needsChartRefresh || wasOpen) renderChart();
 }
 
 function unitDetailHtml(unit, activeSegmentId = null) {
@@ -960,7 +967,7 @@ function bindProfileTagTooltips(root) {
 function profileArtHtml(unit, typeLabel) {
   if (!unit) return `<div class="unit-profile-art empty"><div class="unit-profile-placeholder">?</div><span>${escapeHtml(typeLabel)}</span></div>`;
   const image = unit.icon
-    ? `<img class="unit-profile-image" src="${escapeAttr(unit.icon)}" alt="${escapeAttr(unit.name)}"><div class="unit-profile-placeholder image-fallback">${escapeHtml(initials(unit.name))}</div>`
+    ? `<img class="unit-profile-image" src="${escapeAttr(unit.icon)}" alt="${escapeAttr(unit.name)}" decoding="async"><div class="unit-profile-placeholder image-fallback">${escapeHtml(initials(unit.name))}</div>`
     : `<div class="unit-profile-placeholder">${escapeHtml(initials(unit.name))}</div>`;
   return `<div class="unit-profile-art">${image}</div>`;
 }
@@ -1386,8 +1393,14 @@ function openUnitProfile(unitId, activeSegmentId = null) {
   bindProfileTagTooltips(overlay);
   bindProfileMetaTooltips(overlay);
   bindProfileAltemaTooltips(overlay);
-  bindUnitProfileAdaptiveRows(overlay);
-  bindProfileNoteReaders(overlay);
+  // Let the profile shell paint before installing geometry/overflow observers.
+  // Those observers are important for adaptive sizing, but they do not need to
+  // block the click-to-profile response on large Firefox roadmaps.
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (unitProfileOverlay !== overlay || !overlay.isConnected) return;
+    bindUnitProfileAdaptiveRows(overlay);
+    bindProfileNoteReaders(overlay);
+  }));
   overlay.querySelector(".unit-profile-close")?.focus({ preventScroll: true });
 }
 
@@ -1913,10 +1926,10 @@ function updateMetaOwnerHighlight() {
   if (activeId === metaOwnerHighlightedId) return;
   if (metaOwnerHighlightedId) setMetaOwnerHighlightState(metaOwnerHighlightedId, false);
   if (activeId) setMetaOwnerHighlightState(activeId, true);
-  // Avoid a roadmap-wide ancestor state on hover/focus. Descendant selectors
-  // forced every meta mark to be restyled, which is disproportionately costly
-  // in Firefox on large roadmaps. The active owner remains explicit through its
-  // lane band, tether, nodes, bars, and card outline.
+  // Use one timeline dimming overlay instead of restyling every unrelated mark.
+  // The active owner's bars/links/tether/lane are elevated above it in CSS.
+  // This restores strong focus+context while keeping hover work essentially O(1).
+  metaFocusDimmerEl?.classList.toggle("active", !!activeId);
   els.roadmap.classList.remove("meta-owner-context-active");
   metaOwnerHighlightedId = activeId;
 }
