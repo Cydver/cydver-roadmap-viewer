@@ -1683,6 +1683,7 @@ function metaOwnerTetherGeometry(unit) {
   const anchorX = metaOwnerRouteX(unit, cardRect, cardEdgeY, laneCenter);
   const firstRect = segmentBarRect(unit, firstSegment);
   const targetX = clamp(anchorX, firstRect.x, firstRect.x + firstRect.w);
+  const cardPortX = anchorX < cardRect.left ? cardRect.left : anchorX > cardRect.right ? cardRect.right : anchorX;
   return {
     anchorX,
     laneCenter,
@@ -1692,7 +1693,11 @@ function metaOwnerTetherGeometry(unit) {
     cardArmLeft: anchorX < cardRect.left ? anchorX : cardRect.right,
     cardArmWidth: anchorX < cardRect.left ? cardRect.left - anchorX : anchorX > cardRect.right ? anchorX - cardRect.right : 0,
     armLeft: Math.min(anchorX, targetX),
-    armWidth: Math.abs(targetX - anchorX)
+    armWidth: Math.abs(targetX - anchorX),
+    cardPortX,
+    cardPortY: cardEdgeY,
+    laneNodeX: anchorX,
+    laneNodeY: laneCenter
   };
 }
 function renderMetaOwnerTether(unit) {
@@ -1725,6 +1730,19 @@ function renderMetaOwnerTether(unit) {
     arm.dataset.unitId = unit.id;
     arm.setAttribute("aria-hidden", "true");
   }
+  const cardPort = addDiv("meta-owner-node card-port", {
+    left: `${geometry.cardPortX}px`,
+    top: `${geometry.cardPortY}px`
+  });
+  cardPort.dataset.unitId = unit.id;
+  cardPort.setAttribute("aria-hidden", "true");
+
+  const laneNode = addDiv("meta-owner-node lane-node", {
+    left: `${geometry.laneNodeX}px`,
+    top: `${geometry.laneNodeY}px`
+  });
+  laneNode.dataset.unitId = unit.id;
+  laneNode.setAttribute("aria-hidden", "true");
 }
 function setMetaOwnerHover(unitId) {
   metaOwnerHoverId = unitId || null;
@@ -1737,10 +1755,11 @@ function setMetaOwnerFocus(unitId) {
 function updateMetaOwnerHighlight() {
   if (!els.roadmap) return;
   const activeId = metaOwnerHoverId || metaOwnerFocusId;
+  els.roadmap.classList.toggle("meta-owner-context-active", !!activeId);
   els.roadmap.querySelectorAll(".unit-card").forEach(card => {
     card.classList.toggle("meta-owner-highlight", !!activeId && card.dataset.id === activeId);
   });
-  els.roadmap.querySelectorAll(".meta-bar, .meta-link, .meta-owner-tether, .lane-track[data-unit-id]").forEach(element => {
+  els.roadmap.querySelectorAll(".meta-bar, .meta-link, .meta-owner-tether, .meta-owner-node, .lane-track[data-unit-id]").forEach(element => {
     element.classList.toggle("meta-owner-highlight", !!activeId && element.dataset.unitId === activeId);
   });
 }
@@ -2224,7 +2243,7 @@ function applyMetaFilters() {
     link.classList.toggle("meta-filter-selected", filtersActive && matches);
     link.classList.toggle("meta-filter-muted", filtersActive && !matches);
   });
-  els.roadmap?.querySelectorAll(".meta-owner-tether[data-unit-id], .lane-track[data-unit-id]").forEach(element => {
+  els.roadmap?.querySelectorAll(".meta-owner-tether[data-unit-id], .meta-owner-node[data-unit-id], .lane-track[data-unit-id]").forEach(element => {
     const unitId = element.dataset.unitId;
     const unit = state.units.find(candidate => candidate.id === unitId);
     const unitMatches = !hasUnitFilters || activeMetaUnitFilters.has(unitId);
