@@ -403,17 +403,23 @@ function bindControls() {
     // This does not intercept the gesture; it only marks the period while fingers
     // are down so CSS can temporarily simplify shadows/filters.
     els.chartScroll.addEventListener("touchstart", markWebKitTouchActive, { passive: true });
-    els.chartScroll.addEventListener("touchend", markWebKitTouchActive, { passive: true });
-    els.chartScroll.addEventListener("touchcancel", clearWebKitTouchActive, { passive: true });
+    els.chartScroll.addEventListener("touchend", endWebKitTouchActive, { passive: true });
+    els.chartScroll.addEventListener("touchcancel", cancelWebKitTouchActive, { passive: true });
   }
 
   els.chartScroll.addEventListener("pointerdown", beginTouchGesture);
+  els.chartScroll.addEventListener("lostpointercapture", handleLostTouchPointerCapture);
+  els.roadmap.addEventListener("lostpointercapture", handleLostPanPointerCapture);
   window.addEventListener("pointermove", movePan);
   window.addEventListener("pointerup", endPan);
   window.addEventListener("pointercancel", endPan);
   window.addEventListener("pointermove", moveTouchGesture, { passive: false });
   window.addEventListener("pointerup", endTouchGesture);
   window.addEventListener("pointercancel", endTouchGesture);
+  window.addEventListener("blur", recoverInterruptedPointerInteractions);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) recoverInterruptedPointerInteractions();
+  });
   window.addEventListener("resize", () => {
     zoomScale = clamp(zoomScale, minimumZoom(), MAX_ZOOM);
     applyZoom();
@@ -1004,6 +1010,12 @@ function renderSegment(unit, segment, index = 0, total = 1) {
     if (suppressRoadmapClick || performance.now() < suppressTouchClickUntil) return;
     if (customUnitFilterEditing) {
       toggleCustomUnitFilterDraft(unit);
+      return;
+    }
+    // Touch has no double-click-to-profile path, so do not make mobile wait for
+    // the desktop double-click discriminator before applying a filter toggle.
+    if (isMobileTouchViewport() && (event.pointerType === "touch" || lastInputModality === "touch")) {
+      toggleMetaUnitFilter(unit.id);
       return;
     }
     const existing = metaFilterClickTimers.get(unit.id);
@@ -1765,8 +1777,6 @@ function closeUnitNoteReader(immediate = false) {
 function bindProfileNoteReaders(root) {
   unitProfileOverflowObserver?.disconnect();
   unitProfileOverflowObserver = null;
-  unitProfileLayoutObserver?.disconnect();
-  unitProfileLayoutObserver = null;
   const sections = [...(root?.querySelectorAll('.unit-profile-scroll-notes[data-note-reader="true"]') || [])];
   if (!sections.length) return;
 
@@ -2041,6 +2051,8 @@ function closeUnitProfile(immediate = false) {
   closeUnitNoteReader(true);
   unitProfileOverflowObserver?.disconnect();
   unitProfileOverflowObserver = null;
+  unitProfileLayoutObserver?.disconnect();
+  unitProfileLayoutObserver = null;
   if (!unitProfileOverlay) return;
   const closingProfileOwnerId = metaOwnerProfileId;
   const overlay = unitProfileOverlay;
@@ -3553,9 +3565,30 @@ function markWebKitTouchActive(event) {
   if ((event.touches?.length || 0) > 0) els.chartScroll.classList.add("touch-active");
   else els.chartScroll.classList.remove("touch-active");
 }
-function clearWebKitTouchActive() {
+function finishWebKitPinchGesture() {
+  const hadActivePinch = Boolean(webKitPinchGesture || pinchGesture);
+  webKitPinchGesture = null;
+  if (pinchGesture) commitTouchPinchVisual();
+  pinchGesture = null;
+  pendingTouchPinchFrame = null;
+  clearTouchStageTransform();
+  els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
+  if (hadActivePinch) suppressTouchClickUntil = performance.now() + 400;
+}
+function endWebKitTouchActive(event) {
+  if (!useWebKitNativeGestureInput) return;
+  markWebKitTouchActive(event);
+  // GestureEvent is proprietary WebKit input. Treat the standards-based touch
+  // count as a teardown backstop so a missing/out-of-order gestureend cannot
+  // leave the preview transform and pinch state stuck after one finger lifts.
+  if ((event.touches?.length || 0) < 2 && (webKitPinchGesture || pinchGesture)) {
+    finishWebKitPinchGesture();
+  }
+}
+function cancelWebKitTouchActive() {
   if (!useWebKitNativeGestureInput) return;
   els.chartScroll.classList.remove("touch-active");
+  finishWebKitPinchGesture();
 }
 
 function beginWebKitPinchGesture(event) {
@@ -3566,6 +3599,7 @@ function beginWebKitPinchGesture(event) {
   // GestureEvent is independent of the PointerEvent stream that native scrolling
   // may have cancelled. That lets WebKit keep its native single-finger momentum
   // scroll while giving us a stable, target-independent pinch scale.
+  touchSelectionTapCandidate = null;
   touchPoints.clear();
   touchPanGesture = null;
   pendingTouchPanFrame = null;
@@ -3599,15 +3633,10 @@ function moveWebKitPinchGesture(event) {
   });
 }
 function endWebKitPinchGesture(event) {
-  if (!useWebKitNativeGestureInput || !webKitPinchGesture) return;
+  if (!useWebKitNativeGestureInput) return;
   event.preventDefault();
-  webKitPinchGesture = null;
-  if (pinchGesture) commitTouchPinchVisual();
-  pinchGesture = null;
-  pendingTouchPinchFrame = null;
-  clearTouchStageTransform();
-  els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
-  suppressTouchClickUntil = performance.now() + 400;
+  if (!webKitPinchGesture && !pinchGesture) return;
+  finishWebKitPinchGesture();
 }
 function beginTouchGesture(event) {
   if (event.pointerType !== "touch") return;
@@ -3618,6 +3647,14 @@ function beginTouchGesture(event) {
     ? { pointerId: event.pointerId, startX: point.x, startY: point.y }
     : null;
   if (useWebKitNativeGestureInput) return;
+  // Ignore accidental third+ contacts instead of letting them replace one of the
+  // two active pinch points when a finger lifts. The active pair stays stable.
+  if (!touchPoints.has(event.pointerId) && touchPoints.size >= 2) {
+    touchSelectionTapCandidate = null;
+    suppressTouchClickUntil = performance.now() + 400;
+    event.preventDefault();
+    return;
+  }
   touchPoints.set(event.pointerId, point);
 
   // Keep the entire mobile chart under app control (touch-action:none). A single
@@ -3630,6 +3667,7 @@ function beginTouchGesture(event) {
   }
 
   if (touchPoints.size === 2) {
+    touchSelectionTapCandidate = null;
     if (touchPanGesture) {
       commitTouchPanVisual();
       touchPanGesture = null;
@@ -3763,6 +3801,47 @@ function endTouchGesture(event) {
     pendingTouchPanFrame = null;
     clearTouchStageTransform();
     els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
+  }
+}
+
+function handleLostTouchPointerCapture(event) {
+  if (useWebKitNativeGestureInput || event.pointerType !== "touch" || !touchPoints.has(event.pointerId)) return;
+  // Pointer capture can be lost for reasons other than the normal pointerup path.
+  // Treat an unexpected loss as cancellation so no gesture state survives it.
+  endTouchGesture(event);
+}
+function handleLostPanPointerCapture(event) {
+  if (!panDrag || event.pointerId !== panDrag.pointerId) return;
+  endPan(event);
+}
+function recoverInterruptedPointerInteractions() {
+  touchSelectionTapCandidate = null;
+
+  if (useWebKitNativeGestureInput) {
+    finishWebKitPinchGesture();
+    els.chartScroll.classList.remove("touch-active");
+  } else {
+    if (pinchGesture) commitTouchPinchVisual();
+    else if (touchPanGesture) commitTouchPanVisual();
+    for (const pointerId of touchPoints.keys()) {
+      try { els.chartScroll.releasePointerCapture(pointerId); } catch {}
+    }
+    touchPoints.clear();
+    touchPanGesture = null;
+    pinchGesture = null;
+    pendingTouchPanFrame = null;
+    pendingTouchPinchFrame = null;
+    if (touchGestureFrame) {
+      cancelAnimationFrame(touchGestureFrame);
+      touchGestureFrame = 0;
+    }
+    clearTouchStageTransform();
+    els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
+  }
+
+  if (panDrag) {
+    panDrag = null;
+    els.chartScroll.classList.remove("panning");
   }
 }
 
