@@ -1299,7 +1299,7 @@ function renderPullProbabilityBreakdown(kind, diamondPulls) {
       </div>`);
   }
   const context = otherTarget
-    ? `${isPilotBreakdown ? "Pilot" : "MS"} · joint chance with ${otherLabel} ${pullTargetLabel(otherTarget)}`
+    ? `${isPilotBreakdown ? "Pilot" : "MS"} target · while also targeting ${otherLabel} ${pullTargetLabel(otherTarget)}`
     : `${isPilotBreakdown ? "Pilot" : "MS"} · chance to pull at least each level`;
   els.pullCalcProbabilityList.innerHTML = `<div class="pull-probability-context"><span>${escapeHtml(context)}</span><strong>Adaptive</strong></div>${rows.join("")}`;
 }

@@ -2985,12 +2985,12 @@ body {
 
 
 /* Viewer utility controls: compact opaque technical controls, aligned with Builder toolbar language. */
-.viewer-utility-action {
+.viewer-utility-action,
+.viewer-filter-action {
   position: relative;
   min-width: 0;
   min-height: 32px;
   height: 32px;
-  padding: 7px 11px 7px 28px !important;
   border: 1px solid rgba(255,255,255,.105) !important;
   border-radius: 6px !important;
   background: rgba(255,255,255,.028) !important;
@@ -2999,6 +2999,12 @@ body {
   font-size: 12px;
   font-weight: 850 !important;
   letter-spacing: .025em;
+}
+.viewer-utility-action {
+  padding: 7px 11px 7px 28px !important;
+}
+.viewer-filter-action {
+  padding: 7px 11px !important;
 }
 .viewer-utility-action::before {
   content: "";
@@ -3023,14 +3029,16 @@ body {
   background: transparent;
   transform: translateY(-50%) rotate(45deg);
 }
-.viewer-utility-action:hover {
+.viewer-utility-action:hover,
+.viewer-filter-action:hover {
   transform: translateY(-1px);
   border-color: rgba(99,211,255,.28) !important;
   background: rgba(99,211,255,.052) !important;
   box-shadow: inset 2px 0 0 rgba(99,211,255,.55), inset 0 1px 0 rgba(255,255,255,.045), 0 5px 14px rgba(0,0,0,.14) !important;
 }
 .viewer-utility-action.active,
-.viewer-utility-action[aria-expanded="true"] {
+.viewer-utility-action[aria-expanded="true"],
+.viewer-filter-action.primary-action {
   color: #effbff !important;
   border-color: rgba(99,211,255,.4) !important;
   background: rgba(28,67,86,.58) !important;
