@@ -73,8 +73,13 @@ let unitByIdIndex = new Map();
 let pairedMsByPilotId = new Map();
 let pairedPilotByMsId = new Map();
 let profileTimelineCache = [];
+let profileTimelineIndexById = new Map();
 const profileImageWarmCache = new Map();
 let profileImageWarmupGeneration = 0;
+let profileNeighborWarmupHandle = 0;
+let profileNeighborWarmupGeneration = 0;
+let unitProfileNavigationFrame = 0;
+let unitProfilePendingNavigationId = null;
 let zoomScale = 1;
 let activeUnitId = null;
 const activeMetaStatusFilters = new Set();
@@ -216,13 +221,15 @@ async function decodeProfileWarmEntry(entry) {
 
 function startProfileImageWarmup() {
   const generation = ++profileImageWarmupGeneration;
+
+  // Roadmap card images already populate the browser image cache. On coarse-pointer
+  // devices, decoding every profile image again in a separate warmup queue competes
+  // with touch/profile work for no immediate user benefit. Mobile warms only the
+  // current profile and its immediate neighbours; desktop keeps the broad warm cache.
+  if (isMobileTouchViewport()) return;
+
   const urls = [...new Set((state.units || []).map(unit => String(unit.icon || "").trim()).filter(Boolean))];
   if (!urls.length) return;
-
-  // Start all fetches immediately so the static Viewer can reuse warm HTTP/image
-  // cache entries. Decode in a small idle-time queue so first paint is not competing
-  // with dozens of image decodes on mobile WebKit. Pointer-down on a specific unit
-  // still promotes that MS/pilot pair immediately.
   const entries = urls.map(url => ensureProfileImageWarmEntry(url)).filter(Boolean);
   const startDecodeWorkers = () => {
     if (generation !== profileImageWarmupGeneration) return;
@@ -244,13 +251,47 @@ function startProfileImageWarmup() {
   }
 }
 
-function warmProfilePairImages(unit) {
+function warmProfilePairImages(unit, priority = "high") {
   if (!unit) return;
   const ms = isMs(unit) ? unit : pairedMsForPilot(unit);
   const pilot = isPilot(unit) ? unit : pairedPilotForMs(unit);
   for (const candidate of [ms, pilot]) {
-    const entry = ensureProfileImageWarmEntry(candidate?.icon, "high");
+    const entry = ensureProfileImageWarmEntry(candidate?.icon, priority);
     if (entry) decodeProfileWarmEntry(entry);
+  }
+}
+
+function cancelProfileNeighborWarmup() {
+  profileNeighborWarmupGeneration += 1;
+  if (!profileNeighborWarmupHandle) return;
+  if (typeof cancelIdleCallback === "function") cancelIdleCallback(profileNeighborWarmupHandle);
+  else clearTimeout(profileNeighborWarmupHandle);
+  profileNeighborWarmupHandle = 0;
+}
+
+function scheduleProfileNeighborWarmup(unit) {
+  if (!isMobileTouchViewport()) return;
+  const ms = isMs(unit) ? unit : pairedMsForPilot(unit);
+  if (!ms) return;
+
+  cancelProfileNeighborWarmup();
+  const generation = profileNeighborWarmupGeneration;
+  const timeline = profileTimelineMsUnits();
+  const index = profileTimelineIndexById.get(ms.id) ?? timeline.findIndex(candidate => candidate.id === ms.id);
+  if (index < 0) return;
+  const neighbours = [timeline[index - 1], timeline[index + 1]].filter(Boolean);
+  if (!neighbours.length) return;
+
+  const run = () => {
+    profileNeighborWarmupHandle = 0;
+    if (generation !== profileNeighborWarmupGeneration || !unitProfileOverlay) return;
+    neighbours.forEach(candidate => warmProfilePairImages(candidate, "auto"));
+  };
+
+  if (typeof requestIdleCallback === "function") {
+    profileNeighborWarmupHandle = requestIdleCallback(run, { timeout: 180 });
+  } else {
+    profileNeighborWarmupHandle = setTimeout(run, 60);
   }
 }
 const VIEWER_LOCAL_STATE_KEY = "uceViewerLocalStateV1";
@@ -396,7 +437,7 @@ function bindControls() {
   });
   document.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
-    if (!event.target.closest?.(".legend-item")) hideAppTooltip(true);
+    if (!event.target.closest?.(".legend-item, .legend-info")) hideAppTooltip(true);
     if (event.target.closest?.(".unit-card, .meta-bar, .unit-drawer, .unit-tooltip-card, .viewer-controls, .topbar, .legend-panel, button, a, input, select, textarea")) return;
     hideTooltip(true);
   });
@@ -410,23 +451,14 @@ function bindControls() {
   });
   els.chartScroll.addEventListener("wheel", handleWheelZoom, { passive: false });
 
-  // WebKit exposes high-level GestureEvent scale data on iOS. When available,
-  // let the browser keep native one-finger momentum scrolling and use that native
-  // pinch stream for roadmap zoom. This avoids routing every single-finger pan
-  // through JavaScript on iPhone/iPad while keeping page zoom disabled.
-  useWebKitNativeGestureInput = isMobileTouchViewport()
-    && ("ongesturestart" in window || typeof window.GestureEvent === "function");
-  els.chartScroll.classList.toggle("webkit-native-gesture-input", useWebKitNativeGestureInput);
-  if (useWebKitNativeGestureInput) {
-    els.chartScroll.addEventListener("gesturestart", beginWebKitPinchGesture, { passive: false });
-    els.chartScroll.addEventListener("gesturechange", moveWebKitPinchGesture, { passive: false });
-    els.chartScroll.addEventListener("gestureend", endWebKitPinchGesture, { passive: false });
-    // Track the native touch lifetime separately from GestureEvent so deferred
-    // semantic zoom work never starts while a finger is still on the viewport.
-    els.chartScroll.addEventListener("touchstart", markWebKitTouchActive, { passive: true });
-    els.chartScroll.addEventListener("touchend", endWebKitTouchActive, { passive: true });
-    els.chartScroll.addEventListener("touchcancel", cancelWebKitTouchActive, { passive: true });
-  }
+  // The mobile roadmap is one app-owned interaction surface. Mixing Safari native
+  // momentum scrolling with a separate GestureEvent pinch path creates two owners
+  // for the same scroll position/gesture lifetime and can leave momentum work racing
+  // a newly committed pinch. Modern Safari supports Pointer Events, so coarse-pointer
+  // pan + pinch stay in the same cancel-safe state machine and native overflow does
+  // not participate in roadmap navigation.
+  useWebKitNativeGestureInput = false;
+  els.chartScroll.classList.remove("webkit-native-gesture-input");
 
   els.chartScroll.addEventListener("pointerdown", beginTouchGesture);
   els.chartScroll.addEventListener("lostpointercapture", handleLostTouchPointerCapture);
@@ -807,28 +839,53 @@ function renderSummary() {
 function renderLegend() {
   els.legend.innerHTML = "";
   getStatuses().forEach(status => {
+    const control = document.createElement("span");
+    control.className = "legend-status-control";
+
     const item = document.createElement("span");
     item.className = "legend-item";
     item.dataset.statusId = status.id;
     item.setAttribute("role", "button");
     item.setAttribute("tabindex", "0");
     item.setAttribute("aria-pressed", activeMetaStatusFilters.has(status.id) ? "true" : "false");
-    item.innerHTML = `<i class="legend-swatch" style="--legend-color:${escapeAttr(status.color)}"></i>${escapeHtml(status.label)}`;
+    item.innerHTML = `<i class="legend-swatch" style="--legend-color:${escapeAttr(status.color)}"></i><span class="legend-label">${escapeHtml(status.label)}</span>`;
     const description = String(status.description || "").trim();
-    item.setAttribute("aria-label", `${status.label}. Click to toggle this PVP meta filter.${description ? ` ${description}` : ""}`);
-    bindAppTooltip(item, () => `<h3 class="app-tooltip-status-name" style="--tooltip-status-color:${escapeAttr(status.color)}">${escapeHtml(status.label)}</h3>${description ? `<div class="app-tooltip-description">${multilineHtml(description)}</div>` : ""}<div class="app-tooltip-filter-hint">Click to filter this status on or off.</div>`);
+    const tooltipHtml = () => `<h3 class="app-tooltip-status-name" style="--tooltip-status-color:${escapeAttr(status.color)}">${escapeHtml(status.label)}</h3>${description ? `<div class="app-tooltip-description">${multilineHtml(description)}</div>` : ""}<div class="app-tooltip-filter-hint">${isMobileTouchViewport() ? "Tap the status name to filter it on or off." : "Click to filter this status on or off."}</div>`;
+    item.setAttribute("aria-label", `${status.label}. ${activeMetaStatusFilters.has(status.id) ? "Active" : "Inactive"} PVP meta filter.${description ? ` ${description}` : ""}`);
+    // Desktop keeps hover/focus context on the status itself. A mobile tap on the
+    // status has one job only: filter. Context lives behind the explicit info target.
+    bindAppTooltip(item, tooltipHtml, { pinOnCoarseClick: false });
     item.addEventListener("click", event => {
       event.stopPropagation();
-      const keepPinnedTouchTooltip = isMobileTouchViewport() && lastInputModality === "touch";
-      if (!keepPinnedTouchTooltip) hideAppTooltip(true);
+      hideAppTooltip(true);
       toggleMetaStatusFilter(status.id);
     });
     item.addEventListener("keydown", event => {
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
+      hideAppTooltip(true);
       toggleMetaStatusFilter(status.id);
     });
-    els.legend.appendChild(item);
+    control.appendChild(item);
+
+    if (description) {
+      const info = document.createElement("button");
+      info.type = "button";
+      info.className = "legend-info";
+      info.setAttribute("aria-label", `About ${status.label} meta status`);
+      info.setAttribute("aria-expanded", "false");
+      info.innerHTML = `<span aria-hidden="true">i</span>`;
+      info.addEventListener("click", event => {
+        event.stopPropagation();
+        if (appTooltipPinned && appTooltipAnchorEl === info) {
+          hideAppTooltip(true);
+          return;
+        }
+        showAppTooltip(event, tooltipHtml, true, info);
+      });
+      control.appendChild(info);
+    }
+    els.legend.appendChild(control);
   });
 }
 
@@ -1521,7 +1578,7 @@ window.__ucePlaceholder = function(name) {
   return div;
 };
 
-function bindAppTooltip(element, htmlFactory) {
+function bindAppTooltip(element, htmlFactory, { pinOnCoarseClick = true } = {}) {
   if (!element) return;
   element.addEventListener("pointerenter", (event) => {
     if (event.pointerType === "touch") return;
@@ -1530,7 +1587,7 @@ function bindAppTooltip(element, htmlFactory) {
   // Keep anchored tooltips stationary while the pointer moves inside the same
   // reference. This avoids high-frequency layout work and visual jitter.
   element.addEventListener("pointerleave", () => { if (!appTooltipPinned) hideAppTooltip(); });
-  element.addEventListener("click", (event) => {
+  if (pinOnCoarseClick) element.addEventListener("click", (event) => {
     if (window.matchMedia?.("(hover: hover) and (pointer: fine)")?.matches) return;
     event.stopPropagation();
     showAppTooltip(event, htmlFactory, true, element);
@@ -1543,10 +1600,12 @@ function showAppTooltip(event, htmlFactory, pin = false, anchorEl = null) {
   if (!html) return;
   appTooltipEl = document.createElement("div");
   appTooltipEl.className = "tooltip app-tooltip";
+  appTooltipEl.setAttribute("role", "tooltip");
   appTooltipEl.innerHTML = html;
   document.body.appendChild(appTooltipEl);
   appTooltipPinned = !!pin;
   appTooltipAnchorEl = anchorEl instanceof Element ? anchorEl : (event?.currentTarget instanceof Element ? event.currentTarget : null);
+  if (appTooltipAnchorEl?.classList?.contains("legend-info")) appTooltipAnchorEl.setAttribute("aria-expanded", "true");
   positionAppTooltip(appTooltipEl, event, appTooltipAnchorEl);
 }
 
@@ -1664,6 +1723,7 @@ function positionAppTooltip(element, event, anchorEl = null) {
 
 function hideAppTooltip(force = false) {
   if (appTooltipPinned && !force) return;
+  if (appTooltipAnchorEl?.classList?.contains("legend-info")) appTooltipAnchorEl.setAttribute("aria-expanded", "false");
   appTooltipEl?.remove();
   appTooltipEl = null;
   appTooltipPinned = false;
@@ -1691,7 +1751,7 @@ function bindProfileTagTooltips(root) {
 function profileArtHtml(unit, typeLabel) {
   if (!unit) return `<div class="unit-profile-art empty"><div class="unit-profile-placeholder">?</div><span>${escapeHtml(typeLabel)}</span></div>`;
   const warmed = unit.icon ? profileImageWarmCache.get(String(unit.icon).trim()) : null;
-  const decoding = warmed?.ready ? "sync" : "async";
+  const decoding = !isMobileTouchViewport() && warmed?.ready ? "sync" : "async";
   const image = unit.icon
     ? `<img class="unit-profile-image" src="${escapeAttr(unit.icon)}" alt="${escapeAttr(unit.name)}" width="200" height="200" decoding="${decoding}" loading="eager" fetchpriority="high" crossorigin="anonymous"><div class="unit-profile-placeholder image-fallback">${escapeHtml(initials(unit.name))}</div>`
     : `<div class="unit-profile-placeholder">${escapeHtml(initials(unit.name))}</div>`;
@@ -2033,7 +2093,7 @@ function profileNavigationTargets(clicked, ms) {
   if (!timeline.length) return { previous: null, next: null };
 
   if (ms) {
-    const index = timeline.findIndex(unit => unit.id === ms.id);
+    const index = profileTimelineIndexById.get(ms.id) ?? timeline.findIndex(unit => unit.id === ms.id);
     if (index >= 0) {
       return {
         previous: index > 0 ? timeline[index - 1] : null,
@@ -2127,6 +2187,7 @@ function updateUnitProfileContent(overlay, unitId, activeSegmentId = null) {
   const pilot = isPilot(clicked) ? clicked : pairedPilotForMs(clicked);
   const activeId = ms ? (activeSegmentId || ms.segments?.[0]?.id || null) : null;
   const { previous, next } = profileNavigationTargets(clicked, ms);
+  overlay.dataset.currentMsId = ms?.id || clicked.id;
   overlay.dataset.previousMsId = previous?.id || "";
   overlay.dataset.nextMsId = next?.id || "";
 
@@ -2162,27 +2223,71 @@ function updateUnitProfileContent(overlay, unitId, activeSegmentId = null) {
   bindProfileAltemaTooltips(overlay);
   scheduleUnitProfileContentBindings(overlay);
   setMetaOwnerProfile(ms?.id || null);
+  scheduleProfileNeighborWarmup(ms);
 
   return { clicked, ms, pilot };
+}
+
+function applyUnitProfileNavigationTarget(overlay, targetId, direction = 0) {
+  if (!overlay || overlay !== unitProfileOverlay || !targetId) return null;
+  const updated = updateUnitProfileContent(overlay, targetId);
+  if (!updated) return null;
+  if (isMobileTouchViewport() && lastInputModality === "touch") setMetaOwnerTouchSelection(updated.ms?.id || targetId);
+
+  if (lastInputModality === "keyboard") {
+    const currentButton = overlay.querySelector(direction < 0 ? ".unit-profile-nav-prev" : ".unit-profile-nav-next");
+    if (currentButton?.disabled) overlay.querySelector(".unit-profile-close")?.focus({ preventScroll: true });
+  }
+  return updated;
+}
+
+function cancelUnitProfileNavigation() {
+  if (unitProfileNavigationFrame) cancelAnimationFrame(unitProfileNavigationFrame);
+  unitProfileNavigationFrame = 0;
+  unitProfilePendingNavigationId = null;
+}
+
+function queuedProfileNavigationTarget(overlay, direction) {
+  const timeline = profileTimelineMsUnits();
+  if (!timeline.length) return null;
+  const baseId = unitProfilePendingNavigationId || overlay.dataset.currentMsId;
+  const index = profileTimelineIndexById.get(baseId) ?? timeline.findIndex(unit => unit.id === baseId);
+  if (index < 0) return direction < 0 ? overlay.dataset.previousMsId : overlay.dataset.nextMsId;
+  const nextIndex = Math.max(0, Math.min(timeline.length - 1, index + (direction < 0 ? -1 : 1)));
+  if (nextIndex === index) return null;
+  return timeline[nextIndex]?.id || null;
+}
+
+function queueMobileUnitProfileNavigation(overlay, direction) {
+  const targetId = queuedProfileNavigationTarget(overlay, direction);
+  if (!targetId) return;
+  unitProfilePendingNavigationId = targetId;
+  if (unitProfileNavigationFrame) return;
+  unitProfileNavigationFrame = requestAnimationFrame(() => {
+    unitProfileNavigationFrame = 0;
+    const currentOverlay = unitProfileOverlay;
+    const pendingId = unitProfilePendingNavigationId;
+    unitProfilePendingNavigationId = null;
+    if (!currentOverlay || currentOverlay !== overlay || !pendingId || pendingId === currentOverlay.dataset.currentMsId) return;
+    applyUnitProfileNavigationTarget(currentOverlay, pendingId, direction);
+  });
 }
 
 function navigateUnitProfile(direction) {
   if (!unitProfileOverlay) return;
   const overlay = unitProfileOverlay;
+
+  // Desktop/keyboard navigation was already immediate and inexpensive. On touch,
+  // coalesce a burst to the latest requested MS so obsolete DOM/style/layout work
+  // cannot queue behind rapid taps on a slower mobile main thread.
+  if (isMobileTouchViewport() && lastInputModality === "touch") {
+    queueMobileUnitProfileNavigation(overlay, direction);
+    return;
+  }
+
   const targetId = direction < 0 ? overlay.dataset.previousMsId : overlay.dataset.nextMsId;
   if (!targetId) return;
-
-  const updated = updateUnitProfileContent(overlay, targetId);
-  if (!updated) return;
-  if (isMobileTouchViewport() && lastInputModality === "touch") setMetaOwnerTouchSelection(updated.ms?.id || targetId);
-
-  // The navigation controls themselves are persistent now, so mouse/keyboard focus
-  // no longer has to be destroyed and recreated on every step. If keyboard focus
-  // reaches an edge and its current button becomes disabled, move it to Close.
-  if (lastInputModality === "keyboard") {
-    const currentButton = overlay.querySelector(direction < 0 ? ".unit-profile-nav-prev" : ".unit-profile-nav-next");
-    if (currentButton?.disabled) overlay.querySelector(".unit-profile-close")?.focus({ preventScroll: true });
-  }
+  applyUnitProfileNavigationTarget(overlay, targetId, direction);
 }
 
 function profilePanelHeaderHtml(unit, label, emptyMessage) {
@@ -2200,6 +2305,8 @@ function openUnitProfile(unitId, activeSegmentId = null) {
   closeDrawer();
   closePullCalculator();
   closeUnitProfile(true);
+  cancelUnitProfileNavigation();
+  cancelProfileNeighborWarmup();
 
   profileReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   profileReturnFocusByKeyboard = lastInputModality === "keyboard";
@@ -2243,6 +2350,8 @@ function openUnitProfile(unitId, activeSegmentId = null) {
 
 function closeUnitProfile(immediate = false) {
   closeUnitNoteReader(true);
+  cancelUnitProfileNavigation();
+  cancelProfileNeighborWarmup();
   resetUnitProfileContentBindings();
   if (!unitProfileOverlay) return;
   const closingProfileOwnerId = metaOwnerProfileId;
@@ -3295,6 +3404,7 @@ function rebuildStaticRuntimeIndices() {
     || a.name.localeCompare(b.name)
     || a.id.localeCompare(b.id)
   );
+  profileTimelineIndexById = new Map(profileTimelineCache.map((unit, index) => [unit.id, index]));
 }
 
 function pairedMsForPilot(pilot) {
@@ -3602,7 +3712,9 @@ function updateCustomUnitFilterControls() {
     els.customUnitFilterButton.setAttribute("aria-expanded", customUnitFilterEditing ? "true" : "false");
   }
   if (els.customUnitFilterStatus) {
-    els.customUnitFilterStatus.textContent = `Selecting units · ${count ? `${count} selected` : "none selected"}`;
+    els.customUnitFilterStatus.textContent = isMobileTouchViewport()
+      ? (count ? `${count} selected` : "None selected")
+      : `Selecting units · ${count ? `${count} selected` : "none selected"}`;
     els.customUnitFilterStatus.classList.toggle("hidden", !customUnitFilterEditing);
   }
   els.customUnitFilterSaveButton?.classList.toggle("hidden", !customUnitFilterEditing);
@@ -3621,6 +3733,11 @@ function applyMetaFilters() {
     item.classList.toggle("meta-filter-selected", selected);
     item.classList.toggle("meta-filter-muted", hasStatusFilters && !selected);
     item.setAttribute("aria-pressed", selected ? "true" : "false");
+    const status = getStatuses().find(candidate => candidate.id === item.dataset.statusId);
+    if (status) {
+      const description = String(status.description || "").trim();
+      item.setAttribute("aria-label", `${status.label}. ${selected ? "Active" : "Inactive"} PVP meta filter.${description ? ` ${description}` : ""}`);
+    }
   });
   els.roadmap?.querySelectorAll(".meta-bar[data-unit-id]").forEach(bar => {
     const unitMatches = !hasUnitFilters || unitFilters.has(bar.dataset.unitId);
