@@ -77,18 +77,16 @@ let profileTimelineIndexById = new Map();
 const profileImageWarmCache = new Map();
 const mobileProfileGridCache = new Map();
 const MOBILE_PROFILE_GRID_CACHE_LIMIT = 7;
+let mobileCardMeasurementRoot = null;
+const mobileCardDetailStateCache = new Map();
+const MOBILE_CARD_DETAIL_CACHE_LIMIT = 24;
 let profileImageWarmupGeneration = 0;
-let profileNeighborWarmupHandle = 0;
-let profileNeighborWarmupGeneration = 0;
-let unitProfileNavigationFrame = 0;
-let unitProfilePendingNavigationId = null;
 let zoomScale = 1;
 let activeUnitId = null;
 const activeMetaStatusFilters = new Set();
 const activeMetaUnitFilters = new Set();
 let customUnitFilterEditing = false;
 let customUnitFilterDraft = new Set();
-const metaFilterClickTimers = new Map();
 let metaOwnerHoverId = null;
 let metaOwnerFocusId = null;
 let metaOwnerTouchSelectionId = null;
@@ -134,7 +132,7 @@ const unitProfileBindingTimers = new Set();
 let initialFitTimer = 0;
 let viewportResizeFrame = 0;
 let safeAreaProbeEl = null;
-const TOUCH_ZOOM_SEMANTIC_SETTLE_MS = 90;
+const TOUCH_ZOOM_SEMANTIC_SETTLE_MS = 280;
 
 function createLayoutGeometryCache() {
   return {
@@ -265,44 +263,6 @@ function warmProfilePairImages(unit, priority = "high") {
   }
 }
 
-function cancelProfileNeighborWarmup() {
-  profileNeighborWarmupGeneration += 1;
-  if (!profileNeighborWarmupHandle) return;
-  if (typeof cancelIdleCallback === "function") cancelIdleCallback(profileNeighborWarmupHandle);
-  else clearTimeout(profileNeighborWarmupHandle);
-  profileNeighborWarmupHandle = 0;
-}
-
-function scheduleProfileNeighborWarmup(unit) {
-  if (!isMobileTouchViewport()) return;
-  const ms = isMs(unit) ? unit : pairedMsForPilot(unit);
-  if (!ms) return;
-
-  cancelProfileNeighborWarmup();
-  const generation = profileNeighborWarmupGeneration;
-  const timeline = profileTimelineMsUnits();
-  const index = profileTimelineIndexById.get(ms.id) ?? timeline.findIndex(candidate => candidate.id === ms.id);
-  if (index < 0) return;
-  const neighbours = [timeline[index - 1], timeline[index + 1]].filter(Boolean);
-  if (!neighbours.length) return;
-
-  const run = () => {
-    profileNeighborWarmupHandle = 0;
-    if (generation !== profileNeighborWarmupGeneration || !unitProfileOverlay) return;
-    neighbours.forEach(candidate => {
-      // Building the cached immutable profile grid is enough to start the
-      // browser resource fetch. Avoid a second Image/decode pipeline competing
-      // with the profile the user is actively navigating.
-      prepareMobileProfileGrid(candidate);
-    });
-  };
-
-  if (typeof requestIdleCallback === "function") {
-    profileNeighborWarmupHandle = requestIdleCallback(run, { timeout: 180 });
-  } else {
-    profileNeighborWarmupHandle = setTimeout(run, 60);
-  }
-}
 const VIEWER_LOCAL_STATE_KEY = "uceViewerLocalStateV1";
 const LEGACY_PULL_CALCULATOR_STORAGE_KEY = "ucePullCalculatorV1";
 const PULL_COST_DIAMONDS = 300;
@@ -446,6 +406,7 @@ function bindControls() {
   });
   document.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
+    if (event.pointerType === "touch" || isMobileTouchViewport()) cancelDeferredTouchZoomPresentation();
     if (!event.target.closest?.(".legend-item, .legend-info")) hideAppTooltip(true);
     if (event.target.closest?.(".unit-card, .meta-bar, .unit-drawer, .unit-tooltip-card, .viewer-controls, .topbar, .legend-panel, button, a, input, select, textarea")) return;
     hideTooltip(true);
@@ -898,6 +859,7 @@ function renderLegend() {
 }
 
 function renderChart() {
+  resetMobileCardMeasurementCache();
   captureRoadmapImagesForRender();
   const width = baseChartWidth();
   const height = baseChartHeight();
@@ -1053,7 +1015,12 @@ function renderUnit(unit) {
   plate.textContent = unit.name;
   card.appendChild(plate);
 
-  card.addEventListener("pointerdown", () => warmProfilePairImages(unit), { passive: true });
+  card.addEventListener("pointerdown", () => {
+    // The roadmap artwork is already resident in the browser image cache on mobile.
+    // Starting a second explicit decode at the exact moment the user opens a profile
+    // only creates competing work; desktop retains its existing proactive warmup.
+    if (!isMobileTouchViewport()) warmProfilePairImages(unit);
+  }, { passive: true });
   card.addEventListener("click", event => {
     event.stopPropagation();
     if (suppressRoadmapClick || performance.now() < suppressTouchClickUntil) return;
@@ -1122,7 +1089,7 @@ function renderSegment(unit, segment, index = 0, total = 1) {
   bar.style.setProperty("--bar-text", textPresentation.color);
   bar.dataset.textTone = textPresentation.tone;
   bar.setAttribute("tabindex", "0");
-  bar.setAttribute("aria-label", `${unit.name} - ${metaStatus(segment.statusId).label}. Click to toggle this MS timeline filter. Double-click or press Enter to open Full Profile.`);
+  bar.setAttribute("aria-label", `${unit.name} - ${metaStatus(segment.statusId).label}. Click or press Enter to open Full Profile.`);
 
   const label = document.createElement("span");
   label.className = "bar-label";
@@ -1138,32 +1105,9 @@ function renderSegment(unit, segment, index = 0, total = 1) {
       toggleCustomUnitFilterDraft(unit);
       return;
     }
-    // Touch has no double-click-to-profile path, so do not make mobile wait for
-    // the desktop double-click discriminator before applying a filter toggle.
     if (isMobileTouchViewport() && (event.pointerType === "touch" || lastInputModality === "touch")) {
-      toggleMetaUnitFilter(unit.id);
-      return;
+      setMetaOwnerTouchSelection(unit.id);
     }
-    const existing = metaFilterClickTimers.get(unit.id);
-    if (existing) clearTimeout(existing);
-    const timer = setTimeout(() => {
-      metaFilterClickTimers.delete(unit.id);
-      toggleMetaUnitFilter(unit.id);
-    }, 210);
-    metaFilterClickTimers.set(unit.id, timer);
-  });
-  bar.addEventListener("dblclick", event => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (customUnitFilterEditing) return;
-    // On touch/coarse devices two quick taps must remain two filter toggles.
-    // Treating them as a desktop-style double-click cancels the second toggle and
-    // leaves the timeline looking permanently selected. Mobile users can open the
-    // profile from the normal unit card instead.
-    if (isMobileTouchViewport()) return;
-    const pending = metaFilterClickTimers.get(unit.id);
-    if (pending) clearTimeout(pending);
-    metaFilterClickTimers.delete(unit.id);
     openUnitProfile(unit.id, segment.id);
   });
   bar.addEventListener("pointerenter", event => {
@@ -1188,15 +1132,10 @@ function renderSegment(unit, segment, index = 0, total = 1) {
     if (!customUnitFilterEditing) setMetaOwnerFocus(null);
   });
   bar.addEventListener("keydown", event => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      if (customUnitFilterEditing) toggleCustomUnitFilterDraft(unit);
-      else openUnitProfile(unit.id, segment.id);
-    } else if (event.key === " ") {
-      event.preventDefault();
-      if (customUnitFilterEditing) toggleCustomUnitFilterDraft(unit);
-      else toggleMetaUnitFilter(unit.id);
-    }
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    if (customUnitFilterEditing) toggleCustomUnitFilterDraft(unit);
+    else openUnitProfile(unit.id, segment.id);
   });
   els.roadmap.appendChild(bar);
 }
@@ -1385,6 +1324,7 @@ function openPullCalculator() {
 function closePullCalculator() {
   els.pullCalculator?.classList.add("hidden");
   document.getElementById("btnOpenPullCalculator")?.setAttribute("aria-expanded", "false");
+  maybeScheduleDeferredTouchZoomPresentation();
 }
 
 function resetPullCalculator() {
@@ -1820,7 +1760,14 @@ function bindProfileAltemaTooltips(root) {
 function profileContextHtml(unit) {
   if (!unit) return "";
   const color = tierById(unit.tier).color || "#8d96a6";
-  return `<div class="unit-profile-context"><span class="unit-profile-tier" style="--profile-tier-color:${escapeAttr(color)}">${escapeHtml(unitRowLabel(unit))}</span><span>${escapeHtml(formatWeek(unit.week))}</span>${profileAltemaLinkHtml(unit)}</div>`;
+  const tier = `<span class="unit-profile-tier" style="--profile-tier-color:${escapeAttr(color)}">${escapeHtml(unitRowLabel(unit))}</span>`;
+  const releaseWeek = `<span>${escapeHtml(formatWeek(unit.week))}</span>`;
+  const altema = profileAltemaLinkHtml(unit);
+  if (!isMobileTouchViewport()) {
+    // Desktop is already polished; preserve its exact context-item structure.
+    return `<div class="unit-profile-context">${tier}${releaseWeek}${altema}</div>`;
+  }
+  return `<div class="unit-profile-context">${tier}<span class="unit-profile-release-source"><span class="unit-profile-release-week">${escapeHtml(formatWeek(unit.week))}</span>${altema}</span></div>`;
 }
 
 function profileInvestmentHtml(unit) {
@@ -2239,15 +2186,6 @@ function mobileProfileGridFor(ms, pilot, ownerId, activeId = null, options = {})
   return grid;
 }
 
-function prepareMobileProfileGrid(unit) {
-  if (!isMobileTouchViewport() || !unit) return;
-  const ms = isMs(unit) ? unit : pairedMsForPilot(unit);
-  const pilot = isPilot(unit) ? unit : pairedPilotForMs(unit);
-  const ownerId = ms?.id || unit.id;
-  if (!ownerId || mobileProfileGridCache.has(ownerId)) return;
-  mobileProfileGridFor(ms, pilot, ownerId, null, { background: true });
-}
-
 function resetUnitProfileContentBindings() {
   unitProfileBindingGeneration += 1;
   if (unitProfileBindingFrame) {
@@ -2274,11 +2212,9 @@ function scheduleUnitProfileBindingTimeout(callback, delay, generation, root) {
 function scheduleUnitProfileContentBindings(overlay) {
   const generation = unitProfileBindingGeneration;
   if (isMobileTouchViewport()) {
-    unitProfileBindingFrame = requestAnimationFrame(() => {
-      unitProfileBindingFrame = 0;
-      if (generation !== unitProfileBindingGeneration || unitProfileOverlay !== overlay || !overlay.isConnected) return;
-      bindProfileNoteReaders(overlay, generation);
-    });
+    // Mobile profiles deliberately show their full notes in the stacked scroll
+    // surface and hide the overflow-reader affordance. Do not create observers or
+    // layout reads for a control that cannot appear on this presentation.
     return;
   }
   unitProfileBindingFrame = requestAnimationFrame(() => {
@@ -2342,7 +2278,6 @@ function updateUnitProfileContent(overlay, unitId, activeSegmentId = null) {
   bindProfileAltemaTooltips(grid);
   scheduleUnitProfileContentBindings(overlay);
   setMetaOwnerProfile(ms?.id || null);
-  scheduleProfileNeighborWarmup(ms);
 
   return { clicked, ms, pilot };
 }
@@ -2360,55 +2295,9 @@ function applyUnitProfileNavigationTarget(overlay, targetId, direction = 0) {
   return updated;
 }
 
-function cancelUnitProfileNavigation() {
-  if (unitProfileNavigationFrame) cancelAnimationFrame(unitProfileNavigationFrame);
-  unitProfileNavigationFrame = 0;
-  unitProfilePendingNavigationId = null;
-}
-
-function queuedProfileNavigationTarget(overlay, direction) {
-  const timeline = profileTimelineMsUnits();
-  if (!timeline.length) return null;
-  const baseId = unitProfilePendingNavigationId || overlay.dataset.currentMsId;
-  const index = profileTimelineIndexById.get(baseId) ?? timeline.findIndex(unit => unit.id === baseId);
-  if (index < 0) return direction < 0 ? overlay.dataset.previousMsId : overlay.dataset.nextMsId;
-  const nextIndex = Math.max(0, Math.min(timeline.length - 1, index + (direction < 0 ? -1 : 1)));
-  if (nextIndex === index) return null;
-  return timeline[nextIndex]?.id || null;
-}
-
-function queueMobileUnitProfileNavigation(overlay, direction) {
-  const targetId = queuedProfileNavigationTarget(overlay, direction);
-  if (!targetId) return;
-
-  // Never delay the first touch response. Apply one destination immediately, then
-  // collapse any additional taps that arrive before the next paint into one trailing
-  // destination. This preserves direct manipulation while preventing obsolete profile
-  // rebuilds from accumulating under button spam on a slower mobile main thread.
-  if (!unitProfileNavigationFrame) {
-    applyUnitProfileNavigationTarget(overlay, targetId, direction);
-    unitProfileNavigationFrame = requestAnimationFrame(() => {
-      unitProfileNavigationFrame = 0;
-      const currentOverlay = unitProfileOverlay;
-      const pendingId = unitProfilePendingNavigationId;
-      unitProfilePendingNavigationId = null;
-      if (!currentOverlay || currentOverlay !== overlay || !pendingId || pendingId === currentOverlay.dataset.currentMsId) return;
-      applyUnitProfileNavigationTarget(currentOverlay, pendingId, 0);
-    });
-    return;
-  }
-  unitProfilePendingNavigationId = targetId;
-}
-
 function navigateUnitProfile(direction) {
   if (!unitProfileOverlay) return;
   const overlay = unitProfileOverlay;
-
-  if (isMobileTouchViewport() && lastInputModality === "touch") {
-    queueMobileUnitProfileNavigation(overlay, direction);
-    return;
-  }
-
   const targetId = direction < 0 ? overlay.dataset.previousMsId : overlay.dataset.nextMsId;
   if (!targetId) return;
   applyUnitProfileNavigationTarget(overlay, targetId, direction);
@@ -2424,13 +2313,12 @@ function profilePanelHeaderHtml(unit, label, emptyMessage) {
 function openUnitProfile(unitId, activeSegmentId = null) {
   const clicked = unitByIdIndex.get(unitId) || state.units.find(unit => unit.id === unitId);
   if (!clicked || (!isMs(clicked) && !isPilot(clicked))) return;
+  if (isMobileTouchViewport()) cancelDeferredTouchZoomPresentation();
   hideTooltip(true);
   hideAppTooltip(true);
   closeDrawer();
   closePullCalculator();
   closeUnitProfile(true);
-  cancelUnitProfileNavigation();
-  cancelProfileNeighborWarmup();
 
   profileReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   profileReturnFocusByKeyboard = lastInputModality === "keyboard";
@@ -2474,8 +2362,6 @@ function openUnitProfile(unitId, activeSegmentId = null) {
 
 function closeUnitProfile(immediate = false) {
   closeUnitNoteReader(true);
-  cancelUnitProfileNavigation();
-  cancelProfileNeighborWarmup();
   resetUnitProfileContentBindings();
   if (!unitProfileOverlay) return;
   const closingProfileOwnerId = metaOwnerProfileId;
@@ -2503,6 +2389,7 @@ function closeUnitProfile(immediate = false) {
     // then let the underlying hover/focus state take over without a one-frame flash.
     requestAnimationFrame(() => {
       if (!unitProfileOverlay && metaOwnerProfileId === closingProfileOwnerId) setMetaOwnerProfile(null);
+      if (!unitProfileOverlay) maybeScheduleDeferredTouchZoomPresentation();
     });
   };
 
@@ -2678,7 +2565,7 @@ function isMobileTouchViewport() {
   return Boolean(window.matchMedia?.("(pointer: coarse)")?.matches);
 }
 function useMobileTransformCamera() {
-  return isMobileTouchViewport();
+  return false;
 }
 function minimumZoom() {
   return isMobileTouchViewport() ? MOBILE_MIN_ZOOM : MIN_ZOOM;
@@ -2781,8 +2668,12 @@ function applyZoomSemanticVariables() {
   els.roadmap.style.setProperty("--monthGridLine", `${(gridLinePx * 2).toFixed(2)}px`);
 }
 function applyZoomSemanticPresentation() {
+  // On mobile, measure card-fit geometry in a tiny offscreen replica before
+  // invalidating the enormous live roadmap with new counter-scaled typography.
+  // Desktop keeps its proven direct measurement path unchanged.
+  const mobileCardStates = isMobileTouchViewport() ? measureMobileUnitCardDetailStates() : null;
   applyZoomSemanticVariables();
-  updateAdaptiveRoadmapPresentation();
+  updateAdaptiveRoadmapPresentation(mobileCardStates);
   touchZoomSemanticDirty = false;
 }
 function cancelDeferredTouchZoomPresentation() {
@@ -2801,26 +2692,31 @@ function touchInteractionIsActive() {
     || Boolean(touchPanGesture || pinchGesture || webKitPinchGesture)
     || Boolean(els.chartScroll?.classList.contains("touch-active"));
 }
+function touchZoomSemanticPresentationBlocked() {
+  return Boolean(unitProfileOverlay || unitNoteReaderOverlay || !els.pullCalculator?.classList.contains("hidden") || customUnitFilterEditing);
+}
 function maybeScheduleDeferredTouchZoomPresentation() {
-  if (!touchZoomSemanticDirty || touchInteractionIsActive()) return;
+  if (!touchZoomSemanticDirty || touchInteractionIsActive() || touchZoomSemanticPresentationBlocked()) return;
   cancelDeferredTouchZoomPresentation();
   const generation = touchZoomSemanticGeneration;
   touchZoomSemanticTimer = setTimeout(() => {
     touchZoomSemanticTimer = 0;
-    if (generation !== touchZoomSemanticGeneration || touchInteractionIsActive()) return;
+    if (generation !== touchZoomSemanticGeneration || touchInteractionIsActive() || touchZoomSemanticPresentationBlocked()) return;
 
-    // The semantic zoom pass contains layout-reading work. Spread its three
-    // independent measurement phases across frames so a new touch can preempt
-    // between them instead of sitting behind one long main-thread task.
+    // Mobile's live roadmap is intentionally never queried for geometry here.
+    // Prepare its card decisions in an offscreen replica first, then apply only
+    // writes to the live scene. Desktop retains the proven direct-fit path.
+    const mobileCardStates = isMobileTouchViewport() ? measureMobileUnitCardDetailStates() : null;
+    if (generation !== touchZoomSemanticGeneration || touchInteractionIsActive() || touchZoomSemanticPresentationBlocked()) return;
     applyZoomSemanticVariables();
     updateAdaptiveTierLabels();
     touchZoomSemanticFrame = requestAnimationFrame(() => {
       touchZoomSemanticFrame = 0;
-      if (generation !== touchZoomSemanticGeneration || touchInteractionIsActive()) return;
-      updateUnitCardDetailVisibility();
+      if (generation !== touchZoomSemanticGeneration || touchInteractionIsActive() || touchZoomSemanticPresentationBlocked()) return;
+      updateUnitCardDetailVisibility(mobileCardStates);
       touchZoomSemanticFrame = requestAnimationFrame(() => {
         touchZoomSemanticFrame = 0;
-        if (generation !== touchZoomSemanticGeneration || touchInteractionIsActive()) return;
+        if (generation !== touchZoomSemanticGeneration || touchInteractionIsActive() || touchZoomSemanticPresentationBlocked()) return;
         updateMetaBarLabelVisibility();
         touchZoomSemanticDirty = false;
       });
@@ -3733,31 +3629,192 @@ function compactTierLabel(fullLabel, tierId = "") {
   const single = words[0] || sanitizeText(fullLabel);
   return single.length > 4 ? single.slice(0, 4).toUpperCase() : single;
 }
+const tierLabelTextWidthCache = new Map();
+let tierLabelMeasureContext = null;
+function tierLabelBaseTextWidth(labelText) {
+  const renderedText = sanitizeText(labelText).toUpperCase();
+  if (tierLabelTextWidthCache.has(renderedText)) return tierLabelTextWidthCache.get(renderedText);
+  tierLabelMeasureContext ||= document.createElement("canvas").getContext("2d");
+  const context = tierLabelMeasureContext;
+  if (!context) return Number.POSITIVE_INFINITY;
+  // Match the tier rail typography in CSS at --textBoost:1. Canvas text metrics use
+  // the same browser font resolver as the rendered label; letter spacing is added
+  // explicitly because CanvasRenderingContext2D.measureText() does not include it.
+  const family = getComputedStyle(document.body).fontFamily || "system-ui, sans-serif";
+  const fontSize = 15;
+  context.font = `850 ${fontSize}px ${family}`;
+  const letterSpacing = fontSize * 0.095;
+  const width = context.measureText(renderedText).width + Math.max(0, renderedText.length - 1) * letterSpacing;
+  tierLabelTextWidthCache.set(renderedText, width);
+  return width;
+}
+function tierLabelAvailableTextWidth() {
+  // .tier-label is LEFT_W wide with 22px left padding, 18px right padding and a
+  // 1px right border. Keeping this geometry calculation outside the transformed
+  // roadmap avoids forcing a full layout merely to fit five immutable labels.
+  return LEFT_W - 22 - 18 - 1;
+}
 function updateAdaptiveTierLabels() {
   if (!els.roadmap) return;
-  const entries = Array.from(els.roadmap.querySelectorAll(".tier-label")).map(label => ({
-    label,
-    text: label.querySelector(".tier-label-text")
-  })).filter(entry => entry.text);
-
-  for (const { label, text } of entries) {
-    const fullLabel = label.dataset.fullLabel || text.textContent || "";
-    text.textContent = fullLabel;
-    label.dataset.abbreviated = "false";
-    label.removeAttribute("tabindex");
-    label.removeAttribute("aria-label");
+  if (!isMobileTouchViewport()) {
+    // Preserve the established desktop implementation exactly. Desktop is already
+    // responsive and has no reason to trade its direct rendered-fit check for the
+    // mobile no-forced-layout path.
+    const entries = Array.from(els.roadmap.querySelectorAll(".tier-label")).map(label => ({
+      label,
+      text: label.querySelector(".tier-label-text")
+    })).filter(entry => entry.text);
+    for (const { label, text } of entries) {
+      const fullLabel = label.dataset.fullLabel || text.textContent || "";
+      text.textContent = fullLabel;
+      label.dataset.abbreviated = "false";
+      label.removeAttribute("tabindex");
+      label.removeAttribute("aria-label");
+    }
+    const compact = entries.filter(({ text }) => text.scrollWidth > text.clientWidth + 0.5);
+    for (const { label, text } of compact) {
+      const fullLabel = label.dataset.fullLabel || text.textContent || "";
+      text.textContent = compactTierLabel(fullLabel, label.dataset.tierId || "");
+      label.dataset.abbreviated = "true";
+      label.tabIndex = 0;
+      label.setAttribute("aria-label", fullLabel);
+    }
+    return;
   }
-  const compact = entries.filter(({ text }) => text.scrollWidth > text.clientWidth + 0.5);
-  for (const { label, text } of compact) {
+
+  const available = tierLabelAvailableTextWidth();
+  const boost = legibleTextScale();
+  for (const label of els.roadmap.querySelectorAll(".tier-label")) {
+    const text = label.querySelector(".tier-label-text");
+    if (!text) continue;
     const fullLabel = label.dataset.fullLabel || text.textContent || "";
-    text.textContent = compactTierLabel(fullLabel, label.dataset.tierId || "");
-    label.dataset.abbreviated = "true";
-    label.tabIndex = 0;
-    label.setAttribute("aria-label", fullLabel);
+    const needsCompact = tierLabelBaseTextWidth(fullLabel) * boost > available + 0.5;
+    text.textContent = needsCompact ? compactTierLabel(fullLabel, label.dataset.tierId || "") : fullLabel;
+    label.dataset.abbreviated = needsCompact ? "true" : "false";
+    if (needsCompact) {
+      label.tabIndex = 0;
+      label.setAttribute("aria-label", fullLabel);
+    } else {
+      label.removeAttribute("tabindex");
+      label.removeAttribute("aria-label");
+    }
   }
 }
-function updateUnitCardDetailVisibility() {
+function resetMobileCardMeasurementCache() {
+  mobileCardMeasurementRoot?.remove();
+  mobileCardMeasurementRoot = null;
+  mobileCardDetailStateCache.clear();
+}
+function ensureMobileCardMeasurementRoot() {
+  if (mobileCardMeasurementRoot?.isConnected) return mobileCardMeasurementRoot;
+  if (!els.roadmap) return null;
+  const root = document.createElement("div");
+  root.className = "mobile-card-measure-root";
+  const cardCount = els.roadmap.querySelectorAll(".unit-card").length;
+  const columns = Math.min(20, Math.max(1, cardCount));
+  const rows = Math.max(1, Math.ceil(cardCount / columns));
+  root.setAttribute("aria-hidden", "true");
+  root.inert = true;
+  Object.assign(root.style, {
+    position: "fixed",
+    left: "-20000px",
+    top: "0",
+    width: `${columns * ICON_W}px`,
+    height: `${rows * ICON_W}px`,
+    display: "grid",
+    gridTemplateColumns: `repeat(${columns}, ${ICON_W}px)`,
+    gap: "0",
+    visibility: "hidden",
+    pointerEvents: "none",
+    zIndex: "-1"
+  });
+  for (const source of els.roadmap.querySelectorAll(".unit-card")) {
+    const card = source.cloneNode(true);
+    card.querySelectorAll("img, .placeholder").forEach(node => node.remove());
+    card.classList.remove("icon-only", "tags-only", "active", "meta-owner-highlight", "meta-filter-muted", "meta-filter-selected", "custom-filter-picked", "custom-filter-eligible", "custom-filter-active-selected");
+    card.removeAttribute("tabindex");
+    card.removeAttribute("aria-label");
+    card.style.position = "relative";
+    card.style.left = "auto";
+    card.style.top = "auto";
+    card.style.width = `${ICON_W}px`;
+    card.style.height = `${ICON_W}px`;
+    card.style.zIndex = "auto";
+    root.appendChild(card);
+  }
+  document.body.appendChild(root);
+  mobileCardMeasurementRoot = root;
+  return root;
+}
+function mobileCardDetailStateKey(scale = zoomScale) {
+  return Number(scale).toFixed(4);
+}
+function rememberMobileCardDetailStates(key, states) {
+  if (mobileCardDetailStateCache.has(key)) mobileCardDetailStateCache.delete(key);
+  mobileCardDetailStateCache.set(key, states);
+  while (mobileCardDetailStateCache.size > MOBILE_CARD_DETAIL_CACHE_LIMIT) {
+    mobileCardDetailStateCache.delete(mobileCardDetailStateCache.keys().next().value);
+  }
+}
+function measureMobileUnitCardDetailStates(scale = zoomScale) {
+  const key = mobileCardDetailStateKey(scale);
+  const cached = mobileCardDetailStateCache.get(key);
+  if (cached) {
+    mobileCardDetailStateCache.delete(key);
+    mobileCardDetailStateCache.set(key, cached);
+    return cached;
+  }
+  const visualSize = ICON_W * scale;
+  if (visualSize < CARD_DETAILS_MIN_VISUAL_SIZE) {
+    const states = new Map();
+    for (const unit of state.units || []) states.set(unit.id, { iconOnly: true, tagsOnly: false });
+    rememberMobileCardDetailStates(key, states);
+    return states;
+  }
+  const root = ensureMobileCardMeasurementRoot();
+  if (!root) return null;
+  const boost = legibleTextScale(scale);
+  root.style.setProperty("--textBoost", boost.toFixed(3));
+  const states = new Map();
+  for (const card of root.querySelectorAll(".unit-card")) {
+    const unit = unitByIdIndex.get(card.dataset.id);
+    const tags = card.querySelector(".tags");
+    const nameplate = card.querySelector(".nameplate");
+    const hasTags = Boolean(tags?.children.length);
+    const tagsRect = hasTags ? tags.getBoundingClientRect() : null;
+    const nameRect = nameplate?.getBoundingClientRect() || null;
+    const cardRect = card.getBoundingClientRect();
+    if (isMs(unit)) {
+      const renderedBottomGap = tagsRect ? (cardRect.bottom - tagsRect.bottom) * scale : Number.POSITIVE_INFINITY;
+      const renderedNameGap = tagsRect && nameRect ? (nameRect.top - tagsRect.bottom) * scale : Number.POSITIVE_INFINITY;
+      const tagsFitCard = !hasTags || renderedBottomGap >= CARD_TAGS_MIN_BOTTOM_GAP;
+      const nameHasRoom = visualSize >= CARD_NAME_MIN_VISUAL_SIZE && renderedNameGap >= CARD_NAME_MIN_TAG_GAP;
+      const iconOnly = visualSize < CARD_DETAILS_MIN_VISUAL_SIZE || !tagsFitCard;
+      states.set(card.dataset.id, { iconOnly, tagsOnly: !iconOnly && !nameHasRoom });
+      continue;
+    }
+    const renderedNameGap = tagsRect && nameRect ? (nameRect.top - tagsRect.bottom) * scale : Number.POSITIVE_INFINITY;
+    const detailsCollide = hasTags && renderedNameGap <= 2;
+    states.set(card.dataset.id, { iconOnly: visualSize < CARD_DETAILS_MIN_VISUAL_SIZE || detailsCollide, tagsOnly: false });
+  }
+  rememberMobileCardDetailStates(key, states);
+  return states;
+}
+function applyUnitCardDetailStates(states) {
+  if (!states || !els.roadmap) return;
+  for (const card of els.roadmap.querySelectorAll(".unit-card")) {
+    const detail = states.get(card.dataset.id);
+    if (!detail) continue;
+    card.classList.toggle("icon-only", detail.iconOnly);
+    card.classList.toggle("tags-only", detail.tagsOnly);
+  }
+}
+function updateUnitCardDetailVisibility(precomputedStates = null) {
   if (!els.roadmap) return;
+  if (isMobileTouchViewport()) {
+    applyUnitCardDetailStates(precomputedStates || measureMobileUnitCardDetailStates());
+    return;
+  }
   const unitsById = new Map((state.units || []).map(unit => [unit.id, unit]));
   const measurements = [];
   for (const card of els.roadmap.querySelectorAll(".unit-card")) {
@@ -3791,25 +3848,74 @@ function updateMetaBarLabelVisibility() {
     bar,
     label: bar.querySelector(".bar-label")
   })).filter(entry => entry.label);
-  for (const { label } of entries) {
-    label.hidden = false;
-    label.textContent = label.dataset.fullLabel || label.textContent || "";
+
+  if (!isMobileTouchViewport()) {
+    // Preserve desktop's established direct rendered-geometry behavior.
+    for (const { label } of entries) {
+      label.hidden = false;
+      label.textContent = label.dataset.fullLabel || label.textContent || "";
+    }
+    const needsUnitLabel = [];
+    const shouldHide = new Set();
+    for (const { bar, label } of entries) {
+      const renderedHeight = bar.getBoundingClientRect().height;
+      if (renderedHeight < META_LABEL_MIN_RENDERED_HEIGHT) {
+        shouldHide.add(label);
+        continue;
+      }
+      if (label.scrollWidth > label.clientWidth + 1) needsUnitLabel.push(label);
+    }
+    for (const label of needsUnitLabel) label.textContent = label.dataset.unitLabel || label.dataset.fullLabel || "";
+    for (const label of needsUnitLabel) {
+      if (label.scrollWidth > label.clientWidth + 1) shouldHide.add(label);
+    }
+    for (const { label } of entries) label.hidden = shouldHide.has(label);
+    return;
   }
-  const needsUnitLabel = [];
-  const shouldHide = new Set();
-  for (const { bar, label } of entries) {
-    const renderedHeight = bar.getBoundingClientRect().height;
+
+  const boost = barLabelTextScale();
+  const renderedHeight = BAR_H * zoomScale;
+  for (const { label } of entries) {
+    const fullLabel = label.dataset.fullLabel || label.textContent || "";
+    const unitLabel = label.dataset.unitLabel || fullLabel;
+    label.hidden = false;
+
+    // Viewer data and bar geometry are immutable between renders. Measure each
+    // label's real DOM width once, normalize it to a 1x text boost, then reuse
+    // those metrics for semantic zoom. This preserves geometry-driven fitting
+    // without forcing WebKit to lay out hundreds of labels after every pinch.
+    let metrics = label.__uceMetaLabelMetrics;
+    if (!metrics) {
+      label.textContent = fullLabel;
+      const available = label.clientWidth;
+      const fullWidth = label.scrollWidth;
+      label.textContent = unitLabel;
+      const unitWidth = label.scrollWidth;
+      const safeBoost = Math.max(0.01, boost);
+      metrics = {
+        available,
+        fullBaseWidth: fullWidth / safeBoost,
+        unitBaseWidth: unitWidth / safeBoost
+      };
+      label.__uceMetaLabelMetrics = metrics;
+    }
+
     if (renderedHeight < META_LABEL_MIN_RENDERED_HEIGHT) {
-      shouldHide.add(label);
+      label.hidden = true;
+      label.textContent = fullLabel;
       continue;
     }
-    if (label.scrollWidth > label.clientWidth + 1) needsUnitLabel.push(label);
+    if (metrics.fullBaseWidth * boost <= metrics.available + 0.5) {
+      label.textContent = fullLabel;
+      continue;
+    }
+    if (metrics.unitBaseWidth * boost <= metrics.available + 0.5) {
+      label.textContent = unitLabel;
+      continue;
+    }
+    label.textContent = unitLabel;
+    label.hidden = true;
   }
-  for (const label of needsUnitLabel) label.textContent = label.dataset.unitLabel || label.dataset.fullLabel || "";
-  for (const label of needsUnitLabel) {
-    if (label.scrollWidth > label.clientWidth + 1) shouldHide.add(label);
-  }
-  for (const { label } of entries) label.hidden = shouldHide.has(label);
 }
 
 function toggleMetaStatusFilter(statusId) {
@@ -3818,23 +3924,11 @@ function toggleMetaStatusFilter(statusId) {
   saveViewerLocalState();
   applyMetaFilters();
 }
-function toggleMetaUnitFilter(unitId) {
-  if (activeMetaUnitFilters.has(unitId)) activeMetaUnitFilters.delete(unitId);
-  else activeMetaUnitFilters.add(unitId);
-  saveViewerLocalState();
-  applyMetaFilters();
-  updateCustomUnitFilterControls();
-}
 function effectiveMetaUnitFilters() {
   return customUnitFilterEditing ? customUnitFilterDraft : activeMetaUnitFilters;
 }
-function clearMetaFilterClickTimers() {
-  metaFilterClickTimers.forEach(timer => clearTimeout(timer));
-  metaFilterClickTimers.clear();
-}
 function enterCustomUnitFilterMode() {
   if (customUnitFilterEditing) return;
-  clearMetaFilterClickTimers();
   customUnitFilterDraft = new Set(activeMetaUnitFilters);
   customUnitFilterEditing = true;
   setMetaOwnerHover(null);
@@ -3946,9 +4040,9 @@ function applyMetaFilters() {
     card.classList.toggle("custom-filter-active-selected", !customUnitFilterEditing && hasUnitFilters && unitFilters.has(ownerId));
   });
 }
-function updateAdaptiveRoadmapPresentation() {
+function updateAdaptiveRoadmapPresentation(precomputedCardStates = null) {
   updateAdaptiveTierLabels();
-  updateUnitCardDetailVisibility();
+  updateUnitCardDetailVisibility(precomputedCardStates);
   updateMetaBarLabelVisibility();
 }
 function setMessage(text) {
@@ -4261,6 +4355,11 @@ function endWebKitPinchGesture(event) {
 }
 function beginTouchGesture(event) {
   if (event.pointerType !== "touch") return;
+  // The time window below exists only to swallow a click synthesized from the
+  // gesture that just ended. A fresh pointerdown is an explicit new user action,
+  // so it must immediately regain click eligibility instead of inheriting a
+  // 400ms dead period from the previous pan/pinch.
+  suppressTouchClickUntil = 0;
   cancelInitialFitToWidth();
   const point = { x: event.clientX, y: event.clientY };
   const backgroundTarget = event.target?.closest?.("#roadmap")

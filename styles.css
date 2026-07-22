@@ -4515,3 +4515,141 @@ body {
     font-size: 9px;
   }
 }
+
+/* --- Mobile responsiveness repair: keep the roadmap paint-isolated without WebKit's
+   contain:layout forced-layout penalty, and keep touch geometry visually compact. --- */
+@media (pointer: coarse) {
+  .roadmap {
+    contain: paint style;
+  }
+  /* Promote the very large stage only while fingers are actively moving it. */
+  .chart-stage {
+    will-change: auto;
+    backface-visibility: visible;
+  }
+  .chart-scroll.touch-gesturing .chart-stage {
+    will-change: transform;
+    backface-visibility: hidden;
+  }
+}
+
+.unit-profile-release-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+@media (orientation: portrait) and (max-width: 600px) and (pointer: coarse) {
+  /* Use the identity column efficiently without changing desktop profile geometry. */
+  .unit-profile-grid-lshape > .unit-profile-ms-panel .unit-profile-hero {
+    grid-template-columns: 96px minmax(0, 1fr);
+    gap: 10px;
+    padding-right: 10px;
+  }
+  .unit-profile-grid-lshape > .unit-profile-ms-panel .unit-profile-art { width: 96px; }
+  .unit-profile-pilot-panel .unit-profile-hero {
+    grid-template-columns: 84px minmax(0, 1fr);
+    gap: 10px;
+    padding-right: 10px;
+  }
+  .unit-profile-pilot-panel .unit-profile-art { width: 84px; }
+
+  /* Keep edge arrows out of profile copy while expanding their hit area outward. */
+  .unit-profile-nav {
+    width: 32px;
+    min-width: 32px;
+    height: 48px;
+    min-height: 48px;
+  }
+  .unit-profile-nav-prev { left: max(2px, env(safe-area-inset-left)); }
+  .unit-profile-nav-next { right: max(2px, env(safe-area-inset-right)); }
+  .unit-profile-nav::after {
+    content: "";
+    position: absolute;
+    top: -2px;
+    bottom: -2px;
+    width: 12px;
+  }
+  .unit-profile-nav-prev::after { right: 100%; }
+  .unit-profile-nav-next::after { left: 100%; }
+
+  /* Compact two-action status instrumentation: label filters, narrow i shows help. */
+  .legend-status-control,
+  .legend-status-control .legend-item,
+  .legend-info {
+    height: 26px;
+    min-height: 26px;
+  }
+  .legend-status-control .legend-item {
+    padding: 2px 4px;
+    font-size: 8px;
+  }
+  .legend-info {
+    flex-basis: 22px;
+    width: 22px;
+    min-width: 22px;
+    font-size: 7px;
+  }
+  #btnCustomUnitFilter {
+    height: 26px;
+    min-height: 26px;
+  }
+}
+
+@media (orientation: landscape) and (max-height: 600px) and (pointer: coarse) {
+  .legend-wrap > .legend {
+    grid-template-rows: repeat(5, minmax(22px, 1fr));
+    gap: 2px;
+  }
+  .legend-status-control {
+    min-height: 22px;
+    max-height: 26px;
+  }
+  .legend-status-control .legend-item {
+    min-height: 22px;
+    padding: 1px 4px;
+    font-size: 8px;
+  }
+  .legend-info {
+    flex-basis: 22px;
+    width: 22px;
+    min-width: 22px;
+    min-height: 22px;
+    font-size: 7px;
+  }
+  #btnCustomUnitFilter {
+    height: 26px;
+    min-height: 26px;
+  }
+
+  /* Keep navigation outside profile information in short landscape viewports. */
+  .unit-profile-nav {
+    width: 32px;
+    min-width: 32px;
+    height: 48px;
+    min-height: 48px;
+  }
+  .unit-profile-nav-prev { left: max(2px, env(safe-area-inset-left)); }
+  .unit-profile-nav-next { right: max(2px, env(safe-area-inset-right)); }
+  .unit-profile-nav::after {
+    content: "";
+    position: absolute;
+    top: -2px;
+    bottom: -2px;
+    width: 12px;
+  }
+  .unit-profile-nav-prev::after { right: 100%; }
+  .unit-profile-nav-next::after { left: 100%; }
+
+  .unit-profile-grid-lshape > .unit-profile-ms-panel {
+    padding-left: 42px;
+    padding-right: 42px;
+  }
+  .unit-profile-grid-lshape > .unit-profile-pilot-panel > .unit-profile-pilot-primary,
+  .unit-profile-ms-notes-band > .unit-profile-ms-note-cell,
+  .unit-profile-grid-lshape > .unit-profile-pve-slot {
+    padding-left: 42px;
+    padding-right: 42px;
+  }
+}
