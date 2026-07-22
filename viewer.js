@@ -76,12 +76,7 @@ let profileTimelineCache = [];
 let profileTimelineIndexById = new Map();
 let metaOwnerElementIndex = new Map();
 const profileImageWarmCache = new Map();
-let mobileCardMeasurementRoot = null;
-let mobileCardMeasurementFrame = 0;
-let mobileCardMeasurementGeneration = 0;
-let mobileCardMeasurementJob = null;
-const mobileCardDetailStateCache = new Map();
-const MOBILE_CARD_DETAIL_CACHE_LIMIT = 512;
+let mobileCardNameMetricsById = new Map();
 let profileImageWarmupGeneration = 0;
 let zoomScale = 1;
 let activeUnitId = null;
@@ -132,7 +127,6 @@ let mobileZoomStyleFrame = 0;
 let mobileZoomStyleGeneration = 0;
 let mobileZoomStyleJob = null;
 let mobileTextBoostTargetsCache = [];
-let mobileBarLabelTargetsCache = [];
 let mobileMetaLabelEntriesCache = [];
 let mobileTierLabelEntriesCache = [];
 let mobileGridVerticalCache = [];
@@ -478,7 +472,6 @@ function scheduleViewerViewportRefresh() {
       // roadmap interaction. Never turn that viewport event into a synchronous
       // whole-roadmap inherited-style invalidation; reconcile mobile semantics via
       // the same cancellable/chunked path used after touch gestures.
-      applyZoomStructuralVariables();
       touchZoomSemanticDirty = true;
       maybeScheduleDeferredTouchZoomPresentation();
     } else {
@@ -880,7 +873,7 @@ function renderLegend() {
 }
 
 function renderChart() {
-  resetMobileCardMeasurementCache();
+  mobileCardNameMetricsById.clear();
   captureRoadmapImagesForRender();
   const width = baseChartWidth();
   const height = baseChartHeight();
@@ -2284,6 +2277,7 @@ function bindProfileActionButton(button, action) {
     // of waiting for WebKit's synthesized click recognition; the following click
     // is swallowed locally so mouse/keyboard activation can keep using click.
     suppressClickUntil = performance.now() + 700;
+    suppressTouchClickUntil = Math.max(suppressTouchClickUntil, performance.now() + 700);
     event.stopPropagation();
     if (shouldActivate) action(event);
   });
@@ -2341,10 +2335,7 @@ function openUnitProfile(unitId, activeSegmentId = null) {
 
   overlay.addEventListener("click", event => { if (event.target === overlay) closeUnitProfile(); });
   overlay.addEventListener("keydown", event => trapModalTabKey(overlay, event));
-  overlay.querySelector(".unit-profile-close")?.addEventListener("click", event => {
-    event.stopPropagation();
-    closeUnitProfile();
-  });
+  bindProfileActionButton(overlay.querySelector(".unit-profile-close"), () => closeUnitProfile());
   bindProfileActionButton(overlay.querySelector(".unit-profile-nav-prev"), () => navigateUnitProfile(-1));
   bindProfileActionButton(overlay.querySelector(".unit-profile-nav-next"), () => navigateUnitProfile(1));
 
@@ -2660,25 +2651,10 @@ function applyZoomGeometry() {
   if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
 }
 function applyZoomStructuralVariables() {
+  if (isMobileTouchViewport()) return;
   const gridLinePx = clamp(1 / zoomScale, 1, 1 / minimumZoom());
-  const gridLine = `${gridLinePx.toFixed(2)}px`;
-  const monthGridLine = `${(gridLinePx * 2).toFixed(2)}px`;
-  if (!isMobileTouchViewport()) {
-    els.roadmap.style.setProperty("--gridLine", gridLine);
-    els.roadmap.style.setProperty("--monthGridLine", monthGridLine);
-    return;
-  }
-
-  // A roadmap-level inherited custom property invalidates every descendant that
-  // consumes it. On iOS that can block the UI thread after a pinch. Structural
-  // dividers are a small fixed immutable set indexed once when markup is built.
-  for (const line of mobileGridVerticalCache) {
-    const width = line.classList.contains("month") ? monthGridLine : gridLine;
-    if (line.style.width !== width) line.style.width = width;
-  }
-  for (const line of mobileGridHorizontalCache) {
-    if (line.style.height !== gridLine) line.style.height = gridLine;
-  }
+  els.roadmap.style.setProperty("--gridLine", `${gridLinePx.toFixed(2)}px`);
+  els.roadmap.style.setProperty("--monthGridLine", `${(gridLinePx * 2).toFixed(2)}px`);
 }
 function cancelMobileZoomStyleWork({ markDirty = false } = {}) {
   const hadPending = Boolean(mobileZoomStyleJob || mobileZoomStyleFrame);
@@ -2704,61 +2680,121 @@ function processMobileZoomStyleFrame() {
     return;
   }
 
-  // CSS style/layout reconciliation happens after this callback, so a wall-clock
-  // loop budget alone is not sufficient. Cap the number of independently scoped
-  // elements per frame as well; this keeps each style-recalc slice bounded.
-  const limit = Math.min(job.targets.length, job.index + 12);
-  while (job.index < limit) {
-    const element = job.targets[job.index++];
+  // Keep every post-gesture slice write-only and bounded. A new finger-down
+  // cancels the remaining work before the next slice runs.
+  if (job.verticalIndex < job.verticalLines.length || job.horizontalIndex < job.horizontalLines.length) {
+    let structuralRemaining = 12;
+    while (structuralRemaining > 0 && job.verticalIndex < job.verticalLines.length) {
+      const line = job.verticalLines[job.verticalIndex++];
+      const width = line.classList.contains("month") ? job.monthGridLine : job.gridLine;
+      if (line?.isConnected && line.style.width !== width) line.style.width = width;
+      structuralRemaining -= 1;
+    }
+    while (structuralRemaining > 0 && job.horizontalIndex < job.horizontalLines.length) {
+      const line = job.horizontalLines[job.horizontalIndex++];
+      if (line?.isConnected && line.style.height !== job.gridLine) line.style.height = job.gridLine;
+      structuralRemaining -= 1;
+    }
+    if (job.verticalIndex < job.verticalLines.length || job.horizontalIndex < job.horizontalLines.length) {
+      mobileZoomStyleFrame = requestAnimationFrame(processMobileZoomStyleFrame);
+      return;
+    }
+  }
+
+  if (job.cardIndex < job.cardUnits.length) {
+    const cardLimit = Math.min(job.cardUnits.length, job.cardIndex + 6);
+    while (job.cardIndex < cardLimit) {
+      const unit = job.cardUnits[job.cardIndex++];
+      const card = liveUnitCardForId(unit.id);
+      if (card?.isConnected && card.style.getPropertyValue("--textBoost") !== job.textBoost) {
+        card.style.setProperty("--textBoost", job.textBoost);
+      }
+      applyUnitCardDetailState(unit.id, mobileUnitCardDetailState(unit, job.scale));
+    }
+    if (job.cardIndex < job.cardUnits.length) {
+      mobileZoomStyleFrame = requestAnimationFrame(processMobileZoomStyleFrame);
+      return;
+    }
+  }
+
+  if (job.metaIndex < job.metaEntries.length) {
+    const metaLimit = Math.min(job.metaEntries.length, job.metaIndex + 6);
+    while (job.metaIndex < metaLimit) {
+      const entry = job.metaEntries[job.metaIndex++];
+      const label = entry?.label;
+      if (label?.isConnected) {
+        if (label.style.getPropertyValue("--barTextBoost") !== job.barBoost) {
+          label.style.setProperty("--barTextBoost", job.barBoost);
+        }
+        applyMobileMetaLabelPresentation(entry, job.scale);
+      }
+    }
+    if (job.metaIndex < job.metaEntries.length) {
+      mobileZoomStyleFrame = requestAnimationFrame(processMobileZoomStyleFrame);
+      return;
+    }
+  }
+
+  let remaining = 12;
+  while (remaining > 0 && job.textIndex < job.textTargets.length) {
+    const element = job.textTargets[job.textIndex++];
     if (element?.isConnected && element.style.getPropertyValue("--textBoost") !== job.textBoost) {
       element.style.setProperty("--textBoost", job.textBoost);
     }
+    remaining -= 1;
   }
-  if (job.index < job.targets.length) {
+
+  if (
+    job.verticalIndex < job.verticalLines.length
+    || job.horizontalIndex < job.horizontalLines.length
+    || job.cardIndex < job.cardUnits.length
+    || job.metaIndex < job.metaEntries.length
+    || job.textIndex < job.textTargets.length
+  ) {
     mobileZoomStyleFrame = requestAnimationFrame(processMobileZoomStyleFrame);
     return;
   }
   mobileZoomStyleJob = null;
-  // Never mix the final style-write slice with a geometry read in the same task.
-  // A nested rAF runs on the next rendering opportunity, after the browser has had
-  // a chance to reconcile/paint the local style changes from this frame.
-  mobileZoomStyleFrame = requestAnimationFrame(() => {
-    mobileZoomStyleFrame = 0;
-    if (job.generation !== mobileZoomStyleGeneration || touchInteractionIsActive() || touchZoomSemanticPresentationBlocked()) {
-      touchZoomSemanticDirty = true;
-      return;
-    }
-    scheduleMobileUnitCardDetailVisibility(job.scale);
-  });
 }
 function scheduleMobileZoomStyleWork(scale = zoomScale) {
   if (!isMobileTouchViewport() || !els.roadmap) return;
   cancelMobileZoomStyleWork();
-  const textBoost = legibleTextScale(scale).toFixed(3);
-  const barBoost = barLabelTextScale(scale).toFixed(3);
-
-  // Bar labels are lightweight leaf nodes. Updating their local variable is far
-  // cheaper than changing one inherited roadmap variable that touches the entire
-  // scene, and their fitting decision below uses the exact same boost value.
-  for (const label of mobileBarLabelTargetsCache) {
-    if (label.style.getPropertyValue("--barTextBoost") !== barBoost) label.style.setProperty("--barTextBoost", barBoost);
-  }
-
-  const targets = mobileTextBoostTargets();
-  if (!targets.length) {
-    scheduleMobileUnitCardDetailVisibility(scale);
+  const generation = mobileZoomStyleGeneration;
+  const gridLinePx = clamp(1 / scale, 1, 1 / minimumZoom());
+  mobileZoomStyleJob = {
+    generation,
+    scale,
+    gridLine: `${gridLinePx.toFixed(2)}px`,
+    monthGridLine: `${(gridLinePx * 2).toFixed(2)}px`,
+    verticalLines: mobileGridVerticalCache,
+    verticalIndex: 0,
+    horizontalLines: mobileGridHorizontalCache,
+    horizontalIndex: 0,
+    textBoost: legibleTextScale(scale).toFixed(3),
+    barBoost: barLabelTextScale(scale).toFixed(3),
+    cardUnits: state.units || [],
+    cardIndex: 0,
+    metaEntries: mobileMetaLabelEntriesCache,
+    metaIndex: 0,
+    textTargets: mobileTextBoostTargets(),
+    textIndex: 0
+  };
+  if (
+    !mobileZoomStyleJob.verticalLines.length
+    && !mobileZoomStyleJob.horizontalLines.length
+    && !mobileZoomStyleJob.cardUnits.length
+    && !mobileZoomStyleJob.metaEntries.length
+    && !mobileZoomStyleJob.textTargets.length
+  ) {
+    mobileZoomStyleJob = null;
     return;
   }
-  const generation = mobileZoomStyleGeneration;
-  mobileZoomStyleJob = { generation, scale, textBoost, targets, index: 0 };
   mobileZoomStyleFrame = requestAnimationFrame(processMobileZoomStyleFrame);
 }
 function applyZoomSemanticVariables() {
   if (isMobileTouchViewport()) {
-    // Do not change inherited roadmap-wide zoom variables on mobile. Hundreds of
-    // descendants consume --textBoost/--barTextBoost; changing them can turn one
-    // pinch release or Safari visual-viewport resize into a long style/layout task.
-    applyZoomStructuralVariables();
+    // Mobile semantic/structural writes are committed by the cancellable local
+    // style worker. Keep this synchronous phase free of roadmap-wide invalidation.
     return;
   }
   els.roadmap.style.setProperty("--textBoost", legibleTextScale().toFixed(3));
@@ -2769,7 +2805,6 @@ function applyZoomSemanticPresentation() {
   applyZoomSemanticVariables();
   if (isMobileTouchViewport()) {
     updateAdaptiveTierLabels();
-    updateMetaBarLabelVisibility();
     scheduleMobileZoomStyleWork();
   } else {
     updateAdaptiveRoadmapPresentation();
@@ -2779,7 +2814,6 @@ function applyZoomSemanticPresentation() {
 function cancelDeferredTouchZoomPresentation() {
   touchZoomSemanticGeneration += 1;
   cancelMobileZoomStyleWork({ markDirty: true });
-  cancelMobileCardDetailMeasurement({ markDirty: true });
   if (touchZoomSemanticTimer) {
     clearTimeout(touchZoomSemanticTimer);
     touchZoomSemanticTimer = 0;
@@ -2811,7 +2845,6 @@ function maybeScheduleDeferredTouchZoomPresentation() {
     // dependent style is written to small local scopes across cancellable frames.
     applyZoomSemanticVariables();
     updateAdaptiveTierLabels();
-    updateMetaBarLabelVisibility();
     scheduleMobileZoomStyleWork();
     touchZoomSemanticDirty = false;
   }, TOUCH_ZOOM_SEMANTIC_SETTLE_MS);
@@ -3146,22 +3179,22 @@ function setMetaOwnerProfile(unitId) {
 function rebuildMobileStaticPresentationIndex() {
   if (!els.roadmap || !isMobileTouchViewport()) {
     mobileTextBoostTargetsCache = [];
-    mobileBarLabelTargetsCache = [];
     mobileMetaLabelEntriesCache = [];
     mobileTierLabelEntriesCache = [];
     mobileGridVerticalCache = [];
     mobileGridHorizontalCache = [];
+    mobileCardNameMetricsById.clear();
     return;
   }
   // Viewer roadmap markup is immutable after render. Query the semantic/style
   // targets once instead of rediscovering hundreds of elements after every pinch.
   const headers = Array.from(els.roadmap.querySelectorAll(".month-head,.week-head,.tier-label"));
-  const cards = Array.from(els.roadmap.querySelectorAll(".unit-card"));
   const ownership = Array.from(els.roadmap.querySelectorAll(
     ".lane-track,.meta-owner-tether,.meta-owner-node,.meta-bar,.meta-link"
   ));
-  mobileTextBoostTargetsCache = [...headers, ...cards, ...ownership];
-  mobileBarLabelTargetsCache = Array.from(els.roadmap.querySelectorAll(".bar-label"));
+  // Cards are handled together with their density state so the text scale and
+  // visibility decision become visible in the same bounded slice.
+  mobileTextBoostTargetsCache = [...headers, ...ownership];
   mobileMetaLabelEntriesCache = Array.from(els.roadmap.querySelectorAll(".meta-bar")).map(bar => ({
     bar,
     label: bar.querySelector(".bar-label")
@@ -3172,6 +3205,7 @@ function rebuildMobileStaticPresentationIndex() {
   })).filter(entry => entry.text);
   mobileGridVerticalCache = Array.from(els.roadmap.querySelectorAll(".grid-line.v"));
   mobileGridHorizontalCache = Array.from(els.roadmap.querySelectorAll(".grid-line.h"));
+  rebuildMobileCardPresentationMetrics();
 }
 
 function rebuildMetaOwnerElementIndex() {
@@ -3873,63 +3907,113 @@ function updateAdaptiveTierLabels() {
     }
   }
 }
-function resetMobileCardMeasurementCache() {
-  mobileCardMeasurementGeneration += 1;
-  if (mobileCardMeasurementFrame) {
-    cancelAnimationFrame(mobileCardMeasurementFrame);
-    mobileCardMeasurementFrame = 0;
+function mobileCardNameTokens(name) {
+  const clean = sanitizeText(name);
+  if (!clean) return [];
+  const tokens = [];
+  let latin = "";
+  const flushLatin = () => {
+    if (!latin) return;
+    tokens.push({ text: latin, space: false });
+    latin = "";
+  };
+
+  for (const char of clean) {
+    if (/\s/u.test(char)) {
+      flushLatin();
+      if (tokens.length && !tokens[tokens.length - 1].space) tokens.push({ text: " ", space: true });
+      continue;
+    }
+    if (/[\p{Script=Latin}\p{Number}]/u.test(char)) {
+      latin += char;
+      continue;
+    }
+    if (/[-/_]/u.test(char)) {
+      flushLatin();
+      const previous = tokens[tokens.length - 1];
+      if (previous && !previous.space) previous.text += char;
+      else tokens.push({ text: char, space: false });
+      continue;
+    }
+    flushLatin();
+    tokens.push({ text: char, space: false });
   }
-  mobileCardMeasurementJob = null;
-  mobileCardMeasurementRoot?.remove();
-  mobileCardMeasurementRoot = null;
-  mobileCardDetailStateCache.clear();
+  flushLatin();
+  while (tokens.length && tokens[tokens.length - 1].space) tokens.pop();
+  return tokens;
 }
-function mobileVisibleUnitsForCardPresentation(scale = zoomScale) {
-  if (!els.chartScroll) return state.units || [];
+function rebuildMobileCardPresentationMetrics() {
+  mobileCardNameMetricsById.clear();
+  if (!isMobileTouchViewport() || !(state.units || []).length) return;
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  const bodyFontFamily = getComputedStyle(document.body).fontFamily
+    || 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  context.font = `900 11px ${bodyFontFamily}`;
+  for (const unit of state.units || []) {
+    const tokens = mobileCardNameTokens(unit.name).map(token => ({
+      ...token,
+      width: context.measureText(token.text).width
+    }));
+    mobileCardNameMetricsById.set(unit.id, tokens);
+  }
+}
+function mobileCardNameLineCount(unit, textBoost) {
+  const tokens = mobileCardNameMetricsById.get(unit?.id) || [];
+  if (!tokens.length) return 1;
+  const contentWidth = ICON_W - 18;
+  let lines = 1;
+  let lineWidth = 0;
+  let pendingSpaceWidth = 0;
+  for (const token of tokens) {
+    const tokenWidth = token.width * textBoost;
+    if (token.space) {
+      if (lineWidth > 0) pendingSpaceWidth = tokenWidth;
+      continue;
+    }
+    const proposed = lineWidth + pendingSpaceWidth + tokenWidth;
+    if (lineWidth > 0 && proposed > contentWidth + 0.01) {
+      lines += 1;
+      lineWidth = tokenWidth;
+    } else {
+      lineWidth = proposed;
+    }
+    pendingSpaceWidth = 0;
+  }
+  return lines;
+}
+function mobileUnitCardDetailState(unit, scale = zoomScale) {
   const safeScale = Math.max(0.001, Number(scale) || 1);
-  const buffer = ICON_W;
-  const left = els.chartScroll.scrollLeft / safeScale - buffer;
-  const right = (els.chartScroll.scrollLeft + els.chartScroll.clientWidth) / safeScale + buffer;
-  const top = els.chartScroll.scrollTop / safeScale - buffer;
-  const bottom = (els.chartScroll.scrollTop + els.chartScroll.clientHeight) / safeScale + buffer;
-  return (state.units || []).filter(unit => {
-    const rect = iconRect(unit);
-    return rect.right >= left && rect.left <= right && rect.bottom >= top && rect.top <= bottom;
-  });
-}
-function ensureMobileCardMeasurementRoot() {
-  if (mobileCardMeasurementRoot?.isConnected) return mobileCardMeasurementRoot;
-  const root = document.createElement("div");
-  root.className = "mobile-card-measure-root";
-  root.setAttribute("aria-hidden", "true");
-  root.inert = true;
-  Object.assign(root.style, {
-    position: "fixed",
-    left: "-20000px",
-    top: "0",
-    width: `${ICON_W}px`,
-    height: `${ICON_W}px`,
-    visibility: "hidden",
-    pointerEvents: "none",
-    zIndex: "-1",
-    // Fixed size + offscreen positioning contain this tiny probe without using
-    // contain:layout, which current WebKit has a documented forced-layout
-    // performance issue for. Size/style/paint containment is sufficient here.
-    contain: "size style paint"
-  });
-  document.body.appendChild(root);
-  mobileCardMeasurementRoot = root;
-  return root;
-}
-function mobileCardDetailStateKey(unitId, scale = zoomScale) {
-  return `${unitId}|${Number(scale).toFixed(3)}`;
-}
-function rememberMobileCardDetailState(key, stateValue) {
-  if (mobileCardDetailStateCache.has(key)) mobileCardDetailStateCache.delete(key);
-  mobileCardDetailStateCache.set(key, stateValue);
-  while (mobileCardDetailStateCache.size > MOBILE_CARD_DETAIL_CACHE_LIMIT) {
-    mobileCardDetailStateCache.delete(mobileCardDetailStateCache.keys().next().value);
+  const visualSize = ICON_W * safeScale;
+  const tagCount = Math.min(MAX_TAGS, unit?.tags?.length || 0);
+  const hasTags = tagCount > 0;
+  const textBoost = legibleTextScale(safeScale);
+
+  // Mirror the immutable card CSS geometry from data + premeasured base text
+  // widths only. No clone, getBoundingClientRect(), clientWidth or scrollWidth
+  // is allowed in the post-pinch mobile presentation path.
+  const tagRows = Math.min(tagCount, TAGS_PER_COLUMN);
+  const tagHeight = Math.max(17, 9 * textBoost + 6);
+  const tagsHeight = hasTags ? tagRows * tagHeight + Math.max(0, tagRows - 1) * 4 : 0;
+  const tagsBottom = hasTags ? 8 + tagsHeight : Number.NEGATIVE_INFINITY;
+
+  const nameLines = mobileCardNameLineCount(unit, textBoost);
+  const nameHeight = Math.max(44, 33 + nameLines * 11 * textBoost * 1.12);
+  const nameTop = 175 - nameHeight;
+  const renderedNameGap = hasTags ? (nameTop - tagsBottom) * safeScale : Number.POSITIVE_INFINITY;
+
+  if (isMs(unit)) {
+    const renderedBottomGap = hasTags ? (176 - tagsBottom) * safeScale : Number.POSITIVE_INFINITY;
+    const tagsFitCard = !hasTags || renderedBottomGap >= CARD_TAGS_MIN_BOTTOM_GAP;
+    const nameHasRoom = visualSize >= CARD_NAME_MIN_VISUAL_SIZE
+      && (!hasTags || renderedNameGap >= CARD_NAME_MIN_TAG_GAP);
+    const iconOnly = visualSize < CARD_DETAILS_MIN_VISUAL_SIZE || !tagsFitCard;
+    return { iconOnly, tagsOnly: !iconOnly && !nameHasRoom };
   }
+
+  const detailsCollide = hasTags && renderedNameGap <= 2;
+  return { iconOnly: visualSize < CARD_DETAILS_MIN_VISUAL_SIZE || detailsCollide, tagsOnly: false };
 }
 function liveUnitCardForId(unitId) {
   return (metaOwnerElementIndex.get(unitId) || []).find(element => element.classList?.contains("unit-card") && element.dataset.id === unitId) || null;
@@ -3944,121 +4028,15 @@ function applyUnitCardDetailStates(states) {
   if (!states) return;
   for (const [unitId, detail] of states) applyUnitCardDetailState(unitId, detail);
 }
-function measureMobileUnitCardDetailState(unit, scale = zoomScale) {
-  const source = liveUnitCardForId(unit?.id);
-  const root = ensureMobileCardMeasurementRoot();
-  if (!source || !root) return null;
-  const card = source.cloneNode(true);
-  card.querySelectorAll("img, .placeholder").forEach(node => node.remove());
-  card.classList.remove("icon-only", "tags-only", "active", "meta-owner-highlight", "meta-filter-muted", "meta-filter-selected", "custom-filter-picked", "custom-filter-eligible", "custom-filter-active-selected");
-  card.removeAttribute("tabindex");
-  card.removeAttribute("aria-label");
-  Object.assign(card.style, {
-    position: "relative",
-    left: "auto",
-    top: "auto",
-    width: `${ICON_W}px`,
-    height: `${ICON_W}px`,
-    zIndex: "auto"
-  });
-  root.replaceChildren(card);
-  root.style.setProperty("--textBoost", legibleTextScale(scale).toFixed(3));
-  const visualSize = ICON_W * scale;
-  const tags = card.querySelector(".tags");
-  const nameplate = card.querySelector(".nameplate");
-  const hasTags = Boolean(tags?.children.length);
-  const tagsRect = hasTags ? tags.getBoundingClientRect() : null;
-  const nameRect = nameplate?.getBoundingClientRect() || null;
-  const cardRect = card.getBoundingClientRect();
-  if (isMs(unit)) {
-    const renderedBottomGap = tagsRect ? (cardRect.bottom - tagsRect.bottom) * scale : Number.POSITIVE_INFINITY;
-    const renderedNameGap = tagsRect && nameRect ? (nameRect.top - tagsRect.bottom) * scale : Number.POSITIVE_INFINITY;
-    const tagsFitCard = !hasTags || renderedBottomGap >= CARD_TAGS_MIN_BOTTOM_GAP;
-    const nameHasRoom = visualSize >= CARD_NAME_MIN_VISUAL_SIZE && renderedNameGap >= CARD_NAME_MIN_TAG_GAP;
-    const iconOnly = visualSize < CARD_DETAILS_MIN_VISUAL_SIZE || !tagsFitCard;
-    return { iconOnly, tagsOnly: !iconOnly && !nameHasRoom };
-  }
-  const renderedNameGap = tagsRect && nameRect ? (nameRect.top - tagsRect.bottom) * scale : Number.POSITIVE_INFINITY;
-  const detailsCollide = hasTags && renderedNameGap <= 2;
-  return { iconOnly: visualSize < CARD_DETAILS_MIN_VISUAL_SIZE || detailsCollide, tagsOnly: false };
-}
-function cancelMobileCardDetailMeasurement({ markDirty = false } = {}) {
-  const hadPending = Boolean(mobileCardMeasurementJob || mobileCardMeasurementFrame);
-  mobileCardMeasurementGeneration += 1;
-  if (mobileCardMeasurementFrame) {
-    cancelAnimationFrame(mobileCardMeasurementFrame);
-    mobileCardMeasurementFrame = 0;
-  }
-  mobileCardMeasurementJob = null;
-  if (markDirty && hadPending) touchZoomSemanticDirty = true;
-}
-function processMobileCardDetailMeasurementFrame() {
-  mobileCardMeasurementFrame = 0;
-  const job = mobileCardMeasurementJob;
-  if (!job || job.generation !== mobileCardMeasurementGeneration) return;
-  if (touchInteractionIsActive() || touchZoomSemanticPresentationBlocked()) {
-    touchZoomSemanticDirty = true;
-    mobileCardMeasurementJob = null;
-    return;
-  }
-  const started = performance.now();
-  let processed = 0;
-  while (job.index < job.units.length) {
-    const unit = job.units[job.index++];
-    const key = mobileCardDetailStateKey(unit.id, job.scale);
-    const detail = measureMobileUnitCardDetailState(unit, job.scale);
-    if (detail) {
-      rememberMobileCardDetailState(key, detail);
-      job.states.set(unit.id, detail);
-    }
-    processed += 1;
-    // One contained card measurement is intentionally the unit of preemption.
-    // Never let a backlog of visible cards become one uninterruptible layout task.
-    if (processed >= 1 || performance.now() - started >= 3) break;
-  }
-  if (job.index >= job.units.length) {
-    applyUnitCardDetailStates(job.states);
-    mobileCardMeasurementJob = null;
-    return;
-  }
-  mobileCardMeasurementFrame = requestAnimationFrame(processMobileCardDetailMeasurementFrame);
-}
-function scheduleMobileUnitCardDetailVisibility(scale = zoomScale) {
-  if (!isMobileTouchViewport() || !els.roadmap) return;
-  cancelMobileCardDetailMeasurement();
-  const units = mobileVisibleUnitsForCardPresentation(scale);
-  const visualSize = ICON_W * scale;
-  if (visualSize < CARD_DETAILS_MIN_VISUAL_SIZE) {
-    for (const unit of units) applyUnitCardDetailState(unit.id, { iconOnly: true, tagsOnly: false });
-    return;
-  }
-  const missing = [];
-  const states = new Map();
-  for (const unit of units) {
-    const key = mobileCardDetailStateKey(unit.id, scale);
-    const cached = mobileCardDetailStateCache.get(key);
-    if (cached) {
-      mobileCardDetailStateCache.delete(key);
-      mobileCardDetailStateCache.set(key, cached);
-      states.set(unit.id, cached);
-    } else {
-      missing.push(unit);
-    }
-  }
-  if (!missing.length) {
-    applyUnitCardDetailStates(states);
-    return;
-  }
-  const generation = mobileCardMeasurementGeneration;
-  mobileCardMeasurementJob = { generation, scale, units: missing, index: 0, states };
-  mobileCardMeasurementFrame = requestAnimationFrame(processMobileCardDetailMeasurementFrame);
-}
 
 function updateUnitCardDetailVisibility(precomputedStates = null) {
   if (!els.roadmap) return;
   if (isMobileTouchViewport()) {
-    if (precomputedStates) applyUnitCardDetailStates(precomputedStates);
-    else scheduleMobileUnitCardDetailVisibility();
+    if (precomputedStates) {
+      applyUnitCardDetailStates(precomputedStates);
+    } else {
+      for (const unit of state.units || []) applyUnitCardDetailState(unit.id, mobileUnitCardDetailState(unit));
+    }
     return;
   }
   const unitsById = new Map((state.units || []).map(unit => [unit.id, unit]));
@@ -4087,6 +4065,30 @@ function updateUnitCardDetailVisibility(precomputedStates = null) {
     card.classList.toggle("icon-only", visualSize < CARD_DETAILS_MIN_VISUAL_SIZE || detailsCollide);
     card.classList.remove("tags-only");
   }
+}
+function mobileMetaLabelPresentation(entry, scale = zoomScale) {
+  const { bar, label } = entry || {};
+  if (!bar || !label) return null;
+  const fullLabel = label.dataset.fullLabel || label.textContent || "";
+  const unitLabel = label.dataset.unitLabel || fullLabel;
+  const metrics = label.__uceMetaLabelMetrics || immutableMetaLabelMetrics(bar, label);
+  label.__uceMetaLabelMetrics = metrics;
+  const boost = barLabelTextScale(scale);
+  const renderedHeight = BAR_H * scale;
+  let desiredText = fullLabel;
+  let shouldHide = renderedHeight < META_LABEL_MIN_RENDERED_HEIGHT;
+  if (!shouldHide && metrics.fullBaseWidth * boost > metrics.available + 1) {
+    desiredText = unitLabel;
+    if (metrics.unitBaseWidth * boost > metrics.available + 1) shouldHide = true;
+  }
+  return { desiredText, shouldHide };
+}
+function applyMobileMetaLabelPresentation(entry, scale = zoomScale) {
+  const label = entry?.label;
+  const presentation = mobileMetaLabelPresentation(entry, scale);
+  if (!label || !presentation) return;
+  if (label.textContent !== presentation.desiredText) label.textContent = presentation.desiredText;
+  if (label.hidden !== presentation.shouldHide) label.hidden = presentation.shouldHide;
 }
 function updateMetaBarLabelVisibility() {
   if (!els.roadmap) return;
@@ -4122,25 +4124,7 @@ function updateMetaBarLabelVisibility() {
     return;
   }
 
-  const boost = barLabelTextScale();
-  const renderedHeight = BAR_H * zoomScale;
-  for (const { bar, label } of entries) {
-    const fullLabel = label.dataset.fullLabel || label.textContent || "";
-    const unitLabel = label.dataset.unitLabel || fullLabel;
-    const metrics = label.__uceMetaLabelMetrics || immutableMetaLabelMetrics(bar, label);
-    label.__uceMetaLabelMetrics = metrics;
-
-    let desiredText = fullLabel;
-    let shouldHide = renderedHeight < META_LABEL_MIN_RENDERED_HEIGHT;
-    if (!shouldHide && metrics.fullBaseWidth * boost > metrics.available + 1) {
-      desiredText = unitLabel;
-      if (metrics.unitBaseWidth * boost > metrics.available + 1) shouldHide = true;
-    }
-    // Avoid touching hundreds of immutable labels when their state did not change;
-    // even write-only style invalidation can become visible on WebKit at low zoom.
-    if (label.textContent !== desiredText) label.textContent = desiredText;
-    if (label.hidden !== shouldHide) label.hidden = shouldHide;
-  }
+  for (const entry of entries) applyMobileMetaLabelPresentation(entry, zoomScale);
 
 }
 
@@ -4437,7 +4421,6 @@ function commitTouchPinchVisual() {
   clearTouchStageTransform();
   zoomScale = nextZoom;
   applyZoomGeometry();
-  if (isMobileTouchViewport()) applyZoomStructuralVariables();
   els.chartScroll.scrollLeft = targetScrollLeft;
   els.chartScroll.scrollTop = targetScrollTop;
   markTouchZoomSemanticDirty();
