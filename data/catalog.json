@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-15T05:47:30.258Z",
+  "generatedAt": "2026-07-22T06:12:35.972Z",
   "sources": [
     "https://altema.jp/gundamuce/msrea/4",
     "https://altema.jp/gundamuce/chararea/4"
@@ -126,6 +126,17 @@
       "attribute": "紫",
       "role": "支援",
       "rating": "9"
+    },
+    {
+      "id": "altema-ms-d13c5f05f4",
+      "kind": "ms",
+      "name": "バルギル(紫)",
+      "icon": "icons/altema/ms-バルギル-紫-8f6ae811.jpg",
+      "remoteIcon": "https://img.altema.jp/gundamuce/mobile_suit/icon/418.jpg",
+      "sourceUrl": "https://altema.jp/gundamuce/ms/418",
+      "attribute": "紫",
+      "role": "強襲",
+      "rating": "8.5"
     },
     {
       "id": "altema-ms-20dbb65fe6",
