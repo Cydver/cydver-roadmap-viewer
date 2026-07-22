@@ -3487,47 +3487,12 @@ body {
     touch-action: manipulation;
   }
 
-  /* Nothing inside the roadmap changes semantic state during a live pinch, so
-     transitions only add bookkeeping/raster pressure. Restore them immediately
-     when the gesture ends. */
-  .chart-scroll.touch-pinching .roadmap *,
-  .chart-scroll.touch-pinching .roadmap *::before,
-  .chart-scroll.touch-pinching .roadmap *::after {
-    transition: none !important;
-  }
 }
 
-/* --- Mobile active-gesture raster simplification --- */
-@media (pointer: coarse) {
-  /* During finger-down pan/pinch, preserve all geometry/data but temporarily drop
-     expensive decorative raster effects. They return immediately on release. */
-  .chart-scroll.touch-active .unit-card,
-  .chart-scroll.touch-gesturing .unit-card,
-  .chart-scroll.touch-active .meta-bar,
-  .chart-scroll.touch-gesturing .meta-bar,
-  .chart-scroll.touch-active .meta-owner-tether,
-  .chart-scroll.touch-gesturing .meta-owner-tether,
-  .chart-scroll.touch-active .meta-owner-node,
-  .chart-scroll.touch-gesturing .meta-owner-node,
-  .chart-scroll.touch-active .meta-lane-track,
-  .chart-scroll.touch-gesturing .meta-lane-track {
-    box-shadow: none !important;
-    text-shadow: none !important;
-  }
-
-  .chart-scroll.touch-active .meta-bar,
-  .chart-scroll.touch-gesturing .meta-bar,
-  .chart-scroll.touch-active .meta-link,
-  .chart-scroll.touch-gesturing .meta-link {
-    filter: none !important;
-  }
-
-  .chart-scroll.touch-active .roadmap *,
-  .chart-scroll.touch-active .roadmap *::before,
-  .chart-scroll.touch-active .roadmap *::after {
-    transition: none !important;
-  }
-}
+/* Mobile gesture visuals stay fully rendered. The immutable roadmap moves as one
+   transformed chart-stage layer, so toggling shadows/filters on hundreds of
+   descendants at finger-down/release only creates repaint/style churn and makes
+   MUST P5 / Buff state visibly disappear during the interaction. */
 
 /* --- Pull Calculator: pickup-goal probability model --- */
 .viewer-utility-calc::before {
@@ -3990,5 +3955,80 @@ body {
   .pull-probability-row {
     min-height: 34px;
     padding-block: 5px;
+  }
+}
+
+
+/* --- Mobile safe-area + persistent profile navigation polish --- */
+@media (pointer: coarse) {
+  /* The profile arrows are primary touch controls. Keep a full-size target and
+     never place them under a notch / Dynamic Island in landscape. */
+  .unit-profile-nav {
+    min-width: 44px;
+    min-height: 52px;
+    touch-action: manipulation;
+  }
+  .unit-profile-nav-prev {
+    left: max(6px, calc(env(safe-area-inset-left) + 4px));
+  }
+  .unit-profile-nav-next {
+    right: max(6px, calc(env(safe-area-inset-right) + 4px));
+  }
+}
+
+@media (max-width: 820px) and (pointer: coarse) {
+  /* viewport-fit=cover is intentional; inset all interactive app chrome so
+     portrait sensors, rounded corners, and the home indicator cannot cover it. */
+  .app-shell {
+    padding-top: max(8px, env(safe-area-inset-top));
+    padding-right: max(8px, env(safe-area-inset-right));
+    padding-bottom: max(8px, env(safe-area-inset-bottom));
+    padding-left: max(8px, env(safe-area-inset-left));
+  }
+  .unit-drawer,
+  .diamond-planner-drawer {
+    left: max(8px, env(safe-area-inset-left));
+    right: max(8px, env(safe-area-inset-right));
+    bottom: max(8px, env(safe-area-inset-bottom));
+  }
+  .diamond-planner-drawer {
+    top: max(8px, env(safe-area-inset-top));
+  }
+  .unit-profile-overlay,
+  .unit-note-reader-overlay {
+    padding-top: max(12px, env(safe-area-inset-top));
+    padding-right: max(12px, env(safe-area-inset-right));
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+    padding-left: max(12px, env(safe-area-inset-left));
+  }
+  .unit-profile-card,
+  .unit-note-reader-card {
+    height: 100%;
+    max-height: 100%;
+  }
+}
+
+@media (max-height: 600px) and (orientation: landscape) and (pointer: coarse) {
+  .unit-profile-overlay,
+  .unit-note-reader-overlay {
+    padding-top: max(6px, env(safe-area-inset-top));
+    padding-right: max(6px, env(safe-area-inset-right));
+    padding-bottom: max(6px, env(safe-area-inset-bottom));
+    padding-left: max(6px, env(safe-area-inset-left));
+  }
+  .unit-profile-card,
+  .unit-note-reader-card {
+    height: 100%;
+    max-height: 100%;
+    min-height: 0;
+  }
+}
+
+@media (max-width: 480px) and (pointer: coarse) {
+  .app-shell {
+    padding-top: max(5px, env(safe-area-inset-top));
+    padding-right: max(5px, env(safe-area-inset-right));
+    padding-bottom: max(5px, env(safe-area-inset-bottom));
+    padding-left: max(5px, env(safe-area-inset-left));
   }
 }

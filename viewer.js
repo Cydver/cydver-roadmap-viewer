@@ -114,6 +114,14 @@ let lastInputModality = "pointer";
 let profileReturnFocusByKeyboard = false;
 let useWebKitNativeGestureInput = false;
 let webKitPinchGesture = null;
+let touchZoomSemanticTimer = 0;
+let touchZoomSemanticFrame = 0;
+let touchZoomSemanticDirty = false;
+let touchZoomSemanticGeneration = 0;
+let unitProfileBindingGeneration = 0;
+let unitProfileBindingFrame = 0;
+const unitProfileBindingTimers = new Set();
+const TOUCH_ZOOM_SEMANTIC_SETTLE_MS = 90;
 
 function createLayoutGeometryCache() {
   return {
@@ -399,9 +407,8 @@ function bindControls() {
     els.chartScroll.addEventListener("gesturestart", beginWebKitPinchGesture, { passive: false });
     els.chartScroll.addEventListener("gesturechange", moveWebKitPinchGesture, { passive: false });
     els.chartScroll.addEventListener("gestureend", endWebKitPinchGesture, { passive: false });
-    // Keep decorative raster effects out of WebKit's native scrolling hot path.
-    // This does not intercept the gesture; it only marks the period while fingers
-    // are down so CSS can temporarily simplify shadows/filters.
+    // Track the native touch lifetime separately from GestureEvent so deferred
+    // semantic zoom work never starts while a finger is still on the viewport.
     els.chartScroll.addEventListener("touchstart", markWebKitTouchActive, { passive: true });
     els.chartScroll.addEventListener("touchend", endWebKitTouchActive, { passive: true });
     els.chartScroll.addEventListener("touchcancel", cancelWebKitTouchActive, { passive: true });
@@ -868,6 +875,9 @@ function renderChart() {
     .sort((a, b) => unitZIndex(a, sameSlotOffset(a)) - unitZIndex(b, sameSlotOffset(b)) || a.name.localeCompare(b.name))
     .forEach(renderUnit);
   roadmapImageReuseCache.clear();
+  // Filtering is semantic state, not zoom presentation. Apply it when markup is
+  // rebuilt instead of rescanning the whole roadmap at every zoom commit.
+  applyMetaFilters();
 }
 
 function renderUnit(unit) {
@@ -1774,7 +1784,7 @@ function closeUnitNoteReader(immediate = false) {
   setTimeout(finish, 260);
 }
 
-function bindProfileNoteReaders(root) {
+function bindProfileNoteReaders(root, generation = unitProfileBindingGeneration) {
   unitProfileOverflowObserver?.disconnect();
   unitProfileOverflowObserver = null;
   const sections = [...(root?.querySelectorAll('.unit-profile-scroll-notes[data-note-reader="true"]') || [])];
@@ -1801,6 +1811,7 @@ function bindProfileNoteReaders(root) {
 
   if (typeof ResizeObserver === "function") {
     unitProfileOverflowObserver = new ResizeObserver(entries => {
+      if (generation !== unitProfileBindingGeneration || unitProfileOverlay !== root || !root?.isConnected) return;
       entries.forEach(entry => {
         const section = entry.target.closest?.('.unit-profile-scroll-notes[data-note-reader="true"]') || entry.target;
         if (section?.matches?.('.unit-profile-scroll-notes[data-note-reader="true"]')) updateSection(section);
@@ -1813,9 +1824,12 @@ function bindProfileNoteReaders(root) {
     });
   }
 
-  const updateAll = () => sections.forEach(updateSection);
+  const updateAll = () => {
+    if (generation !== unitProfileBindingGeneration || unitProfileOverlay !== root || !root?.isConnected) return;
+    sections.forEach(updateSection);
+  };
   requestAnimationFrame(() => requestAnimationFrame(updateAll));
-  setTimeout(updateAll, 120);
+  scheduleUnitProfileBindingTimeout(updateAll, 120, generation, root);
 }
 
 
@@ -1872,17 +1886,26 @@ function updateUnitProfileAdaptiveRows(root) {
   grid.style.setProperty('--profile-top-row', `${topHeight}px`);
 }
 
-function bindUnitProfileAdaptiveRows(root) {
+function bindUnitProfileAdaptiveRows(root, generation = unitProfileBindingGeneration) {
   unitProfileLayoutObserver?.disconnect();
   unitProfileLayoutObserver = null;
 
   const card = root?.querySelector('.unit-profile-card');
   if (!card) return;
 
+  // Mobile profiles are one continuous stacked scroll surface. Creating a live
+  // ResizeObserver here did no useful layout work (the updater immediately returned)
+  // but still generated callbacks during every rapid previous/next content swap.
+  if (window.matchMedia?.('(max-width: 820px), (max-height: 600px) and (pointer: coarse)')?.matches) return;
+
   let frame = 0;
   const update = () => {
+    if (generation !== unitProfileBindingGeneration || unitProfileOverlay !== root || !root?.isConnected) return;
     cancelAnimationFrame(frame);
-    frame = requestAnimationFrame(() => updateUnitProfileAdaptiveRows(root));
+    frame = requestAnimationFrame(() => {
+      if (generation !== unitProfileBindingGeneration || unitProfileOverlay !== root || !root?.isConnected) return;
+      updateUnitProfileAdaptiveRows(root);
+    });
   };
 
   if (typeof ResizeObserver === 'function') {
@@ -1891,7 +1914,7 @@ function bindUnitProfileAdaptiveRows(root) {
   }
 
   requestAnimationFrame(() => requestAnimationFrame(update));
-  setTimeout(update, 120);
+  scheduleUnitProfileBindingTimeout(update, 120, generation, root);
   if (document.fonts?.ready) document.fonts.ready.then(update).catch(() => {});
 }
 
@@ -1938,23 +1961,131 @@ function profileNavigationTargets(clicked, ms) {
   };
 }
 
+function unitProfileGridHtml(ms, pilot, activeId) {
+  return `
+    <section class="unit-profile-panel unit-profile-ms-panel">
+      ${profilePanelHeaderHtml(ms, "MOBILE SUIT", "No paired MS")}
+      ${ms ? profileInvestmentHtml(ms) : ""}
+      ${ms ? profileMetaHtml(ms, activeId) : ""}
+    </section>
+    <section class="unit-profile-panel unit-profile-pilot-panel">
+      <div class="unit-profile-pilot-primary">
+        ${profilePanelHeaderHtml(pilot, "PILOT", "No paired pilot")}
+        ${pilot ? profileScrollableNotesHtml("Pilot Notes", [pilot.notesPvp, pilot.notesPve].filter(Boolean).join("\n\n"), "No pilot notes added.", "unit-profile-pilot-notes", false) : ""}
+      </div>
+    </section>
+    <section class="unit-profile-ms-notes-band" aria-label="Mobile Suit notes">
+      <div class="unit-profile-ms-note-cell unit-profile-ms-pvp-cell">
+        ${ms ? profileScrollableNotesHtml("PVP Notes", ms.notesPvp, "No PVP notes added.", "unit-profile-pvp-notes", true) : `<div class="unit-profile-note-empty standalone">No paired MS PVP notes.</div>`}
+      </div>
+      <div class="unit-profile-ms-note-cell unit-profile-ms-pve-cell">
+        ${ms ? profileScrollableNotesHtml("PVE Notes", ms.notesPve, "No PVE notes added.", "unit-profile-pve-notes", true) : `<div class="unit-profile-note-empty standalone">No paired MS PVE notes.</div>`}
+      </div>
+    </section>`;
+}
+
+function resetUnitProfileContentBindings() {
+  unitProfileBindingGeneration += 1;
+  if (unitProfileBindingFrame) {
+    cancelAnimationFrame(unitProfileBindingFrame);
+    unitProfileBindingFrame = 0;
+  }
+  unitProfileBindingTimers.forEach(timer => clearTimeout(timer));
+  unitProfileBindingTimers.clear();
+  unitProfileOverflowObserver?.disconnect();
+  unitProfileOverflowObserver = null;
+  unitProfileLayoutObserver?.disconnect();
+  unitProfileLayoutObserver = null;
+}
+
+function scheduleUnitProfileBindingTimeout(callback, delay, generation, root) {
+  const timer = setTimeout(() => {
+    unitProfileBindingTimers.delete(timer);
+    if (generation !== unitProfileBindingGeneration || unitProfileOverlay !== root || !root?.isConnected) return;
+    callback();
+  }, delay);
+  unitProfileBindingTimers.add(timer);
+}
+
+function scheduleUnitProfileContentBindings(overlay) {
+  const generation = unitProfileBindingGeneration;
+  unitProfileBindingFrame = requestAnimationFrame(() => {
+    unitProfileBindingFrame = requestAnimationFrame(() => {
+      unitProfileBindingFrame = 0;
+      if (generation !== unitProfileBindingGeneration || unitProfileOverlay !== overlay || !overlay.isConnected) return;
+      bindUnitProfileAdaptiveRows(overlay, generation);
+      bindProfileNoteReaders(overlay, generation);
+    });
+  });
+}
+
+function updateUnitProfileContent(overlay, unitId, activeSegmentId = null) {
+  const clicked = unitByIdIndex.get(unitId) || state.units.find(unit => unit.id === unitId);
+  if (!overlay || !clicked || (!isMs(clicked) && !isPilot(clicked))) return null;
+
+  closeUnitNoteReader(true);
+  hideAppTooltip(true);
+  resetUnitProfileContentBindings();
+
+  const ms = isMs(clicked) ? clicked : pairedMsForPilot(clicked);
+  const pilot = isPilot(clicked) ? clicked : pairedPilotForMs(clicked);
+  const activeId = ms ? (activeSegmentId || ms.segments?.[0]?.id || null) : null;
+  const { previous, next } = profileNavigationTargets(clicked, ms);
+  overlay.dataset.previousMsId = previous?.id || "";
+  overlay.dataset.nextMsId = next?.id || "";
+
+  const prevButton = overlay.querySelector(".unit-profile-nav-prev");
+  const nextButton = overlay.querySelector(".unit-profile-nav-next");
+  if (prevButton) {
+    prevButton.disabled = !previous;
+    prevButton.setAttribute("aria-label", previous ? `Previous MS: ${previous.name}` : "No previous MS");
+  }
+  if (nextButton) {
+    nextButton.disabled = !next;
+    nextButton.setAttribute("aria-label", next ? `Next MS: ${next.name}` : "No next MS");
+  }
+
+  const card = overlay.querySelector(".unit-profile-card");
+  card?.setAttribute("aria-label", ms?.name || pilot?.name || "Unit profile");
+  const grid = overlay.querySelector(".unit-profile-grid");
+  if (!grid) return null;
+  grid.className = `unit-profile-grid unit-profile-grid-lshape${ms && (ms.segments || []).length >= 5 ? " meta-very-dense" : ms && (ms.segments || []).length >= 3 ? " meta-dense" : ""}`;
+  grid.innerHTML = unitProfileGridHtml(ms, pilot, activeId);
+  if (card) card.scrollTop = 0;
+
+  overlay.querySelectorAll(".unit-profile-image").forEach(img => {
+    img.addEventListener("error", () => {
+      img.style.display = "none";
+      const fallback = img.nextElementSibling;
+      if (fallback) fallback.classList.remove("image-fallback");
+    }, { once: true });
+  });
+  bindProfileTagTooltips(overlay);
+  bindProfileMetaTooltips(overlay);
+  bindProfileAltemaTooltips(overlay);
+  scheduleUnitProfileContentBindings(overlay);
+  setMetaOwnerProfile(ms?.id || null);
+
+  return { clicked, ms, pilot };
+}
+
 function navigateUnitProfile(direction) {
   if (!unitProfileOverlay) return;
-  const targetId = direction < 0
-    ? unitProfileOverlay.dataset.previousMsId
-    : unitProfileOverlay.dataset.nextMsId;
+  const overlay = unitProfileOverlay;
+  const targetId = direction < 0 ? overlay.dataset.previousMsId : overlay.dataset.nextMsId;
   if (!targetId) return;
 
-  const originalReturnFocus = profileReturnFocus;
-  if (isMobileTouchViewport() && lastInputModality === "touch") setMetaOwnerTouchSelection(targetId);
-  openUnitProfile(targetId);
-  profileReturnFocus = originalReturnFocus;
+  const updated = updateUnitProfileContent(overlay, targetId);
+  if (!updated) return;
+  if (isMobileTouchViewport() && lastInputModality === "touch") setMetaOwnerTouchSelection(updated.ms?.id || targetId);
 
-  const selector = direction < 0 ? ".unit-profile-nav-prev" : ".unit-profile-nav-next";
-  requestAnimationFrame(() => {
-    const button = unitProfileOverlay?.querySelector(selector);
-    if (button && !button.disabled) button.focus({ preventScroll: true });
-  });
+  // The navigation controls themselves are persistent now, so mouse/keyboard focus
+  // no longer has to be destroyed and recreated on every step. If keyboard focus
+  // reaches an edge and its current button becomes disabled, move it to Close.
+  if (lastInputModality === "keyboard") {
+    const currentButton = overlay.querySelector(direction < 0 ? ".unit-profile-nav-prev" : ".unit-profile-nav-next");
+    if (currentButton?.disabled) overlay.querySelector(".unit-profile-close")?.focus({ preventScroll: true });
+  }
 }
 
 function profilePanelHeaderHtml(unit, label, emptyMessage) {
@@ -1973,45 +2104,18 @@ function openUnitProfile(unitId, activeSegmentId = null) {
   closePullCalculator();
   closeUnitProfile(true);
 
-  const ms = isMs(clicked) ? clicked : pairedMsForPilot(clicked);
-  const pilot = isPilot(clicked) ? clicked : pairedPilotForMs(clicked);
-  setMetaOwnerProfile(ms?.id || null);
-  const activeId = ms ? (activeSegmentId || ms.segments?.[0]?.id || null) : null;
-  const { previous, next } = profileNavigationTargets(clicked, ms);
   profileReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   profileReturnFocusByKeyboard = lastInputModality === "keyboard";
 
   const overlay = document.createElement("div");
   overlay.className = "unit-profile-overlay";
-  overlay.dataset.previousMsId = previous?.id || "";
-  overlay.dataset.nextMsId = next?.id || "";
   overlay.innerHTML = `
-    <button class="unit-profile-nav unit-profile-nav-prev" type="button" aria-label="${escapeAttr(previous ? `Previous MS: ${previous.name}` : "No previous MS")}" ${previous ? "" : "disabled"}><span aria-hidden="true">‹</span></button>
-    <article class="unit-profile-card" role="dialog" aria-modal="true" aria-label="${escapeAttr(ms?.name || pilot?.name || "Unit profile")}">
+    <button class="unit-profile-nav unit-profile-nav-prev" type="button" aria-label="No previous MS" disabled><span aria-hidden="true">‹</span></button>
+    <article class="unit-profile-card" role="dialog" aria-modal="true" aria-label="Unit profile">
       <button class="unit-profile-close" type="button" aria-label="Close profile">×</button>
-      <div class="unit-profile-grid unit-profile-grid-lshape${ms && (ms.segments || []).length >= 5 ? " meta-very-dense" : ms && (ms.segments || []).length >= 3 ? " meta-dense" : ""}">
-        <section class="unit-profile-panel unit-profile-ms-panel">
-          ${profilePanelHeaderHtml(ms, "MOBILE SUIT", "No paired MS")}
-          ${ms ? profileInvestmentHtml(ms) : ""}
-          ${ms ? profileMetaHtml(ms, activeId) : ""}
-        </section>
-        <section class="unit-profile-panel unit-profile-pilot-panel">
-          <div class="unit-profile-pilot-primary">
-            ${profilePanelHeaderHtml(pilot, "PILOT", "No paired pilot")}
-            ${pilot ? profileScrollableNotesHtml("Pilot Notes", [pilot.notesPvp, pilot.notesPve].filter(Boolean).join("\n\n"), "No pilot notes added.", "unit-profile-pilot-notes", false) : ""}
-          </div>
-        </section>
-        <section class="unit-profile-ms-notes-band" aria-label="Mobile Suit notes">
-          <div class="unit-profile-ms-note-cell unit-profile-ms-pvp-cell">
-            ${ms ? profileScrollableNotesHtml("PVP Notes", ms.notesPvp, "No PVP notes added.", "unit-profile-pvp-notes", true) : `<div class="unit-profile-note-empty standalone">No paired MS PVP notes.</div>`}
-          </div>
-          <div class="unit-profile-ms-note-cell unit-profile-ms-pve-cell">
-            ${ms ? profileScrollableNotesHtml("PVE Notes", ms.notesPve, "No PVE notes added.", "unit-profile-pve-notes", true) : `<div class="unit-profile-note-empty standalone">No paired MS PVE notes.</div>`}
-          </div>
-        </section>
-      </div>
+      <div class="unit-profile-grid unit-profile-grid-lshape"></div>
     </article>
-    <button class="unit-profile-nav unit-profile-nav-next" type="button" aria-label="${escapeAttr(next ? `Next MS: ${next.name}` : "No next MS")}" ${next ? "" : "disabled"}><span aria-hidden="true">›</span></button>`;
+    <button class="unit-profile-nav unit-profile-nav-next" type="button" aria-label="No next MS" disabled><span aria-hidden="true">›</span></button>`;
 
   overlay.addEventListener("click", event => { if (event.target === overlay) closeUnitProfile(); });
   overlay.querySelector(".unit-profile-close")?.addEventListener("click", () => closeUnitProfile());
@@ -2023,36 +2127,22 @@ function openUnitProfile(unitId, activeSegmentId = null) {
     event.stopPropagation();
     navigateUnitProfile(1);
   });
-  overlay.querySelectorAll(".unit-profile-image").forEach(img => {
-    img.addEventListener("error", () => {
-      img.style.display = "none";
-      const fallback = img.nextElementSibling;
-      if (fallback) fallback.classList.remove("image-fallback");
-    }, { once: true });
-  });
+
   document.body.appendChild(overlay);
   document.body.classList.add("unit-profile-open");
   unitProfileOverlay = overlay;
-  bindProfileTagTooltips(overlay);
-  bindProfileMetaTooltips(overlay);
-  bindProfileAltemaTooltips(overlay);
-  // Let the profile shell paint before installing geometry/overflow observers.
-  // Those observers are important for adaptive sizing, but they do not need to
-  // block the click-to-profile response on large Firefox roadmaps.
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    if (unitProfileOverlay !== overlay || !overlay.isConnected) return;
-    bindUnitProfileAdaptiveRows(overlay);
-    bindProfileNoteReaders(overlay);
-  }));
-  overlay.querySelector(".unit-profile-close")?.focus({ preventScroll: true });
+  updateUnitProfileContent(overlay, unitId, activeSegmentId);
+
+  // Programmatic focus is useful for desktop/keyboard dialog semantics, but on a
+  // touch-opened mobile profile it creates an extra focus/scroll cycle for no gain.
+  if (!isMobileTouchViewport() || profileReturnFocusByKeyboard) {
+    overlay.querySelector(".unit-profile-close")?.focus({ preventScroll: true });
+  }
 }
 
 function closeUnitProfile(immediate = false) {
   closeUnitNoteReader(true);
-  unitProfileOverflowObserver?.disconnect();
-  unitProfileOverflowObserver = null;
-  unitProfileLayoutObserver?.disconnect();
-  unitProfileLayoutObserver = null;
+  resetUnitProfileContentBindings();
   if (!unitProfileOverlay) return;
   const closingProfileOwnerId = metaOwnerProfileId;
   const overlay = unitProfileOverlay;
@@ -2285,10 +2375,15 @@ function handleWheelZoom(event) {
   setZoomAtClientPoint(zoomScale * factor, event.clientX, event.clientY);
 }
 
-function applyZoom() {
+function applyZoomGeometry() {
   const width = baseChartWidth();
   const height = baseChartHeight();
   els.roadmap.style.transform = `scale(${zoomScale})`;
+  els.chartStage.style.width = `${width * zoomScale}px`;
+  els.chartStage.style.height = `${height * zoomScale}px`;
+  if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
+}
+function applyZoomSemanticVariables() {
   els.roadmap.style.setProperty("--textBoost", legibleTextScale().toFixed(3));
   els.roadmap.style.setProperty("--barTextBoost", barLabelTextScale().toFixed(3));
   // Keep structural dividers at a stable rendered thickness while zooming out.
@@ -2297,10 +2392,63 @@ function applyZoom() {
   const gridLinePx = clamp(1 / zoomScale, 1, 1 / minimumZoom());
   els.roadmap.style.setProperty("--gridLine", `${gridLinePx.toFixed(2)}px`);
   els.roadmap.style.setProperty("--monthGridLine", `${(gridLinePx * 2).toFixed(2)}px`);
-  els.chartStage.style.width = `${width * zoomScale}px`;
-  els.chartStage.style.height = `${height * zoomScale}px`;
-  if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
+}
+function applyZoomSemanticPresentation() {
+  applyZoomSemanticVariables();
   updateAdaptiveRoadmapPresentation();
+  touchZoomSemanticDirty = false;
+}
+function cancelDeferredTouchZoomPresentation() {
+  touchZoomSemanticGeneration += 1;
+  if (touchZoomSemanticTimer) {
+    clearTimeout(touchZoomSemanticTimer);
+    touchZoomSemanticTimer = 0;
+  }
+  if (touchZoomSemanticFrame) {
+    cancelAnimationFrame(touchZoomSemanticFrame);
+    touchZoomSemanticFrame = 0;
+  }
+}
+function touchInteractionIsActive() {
+  return touchPoints.size > 0
+    || Boolean(touchPanGesture || pinchGesture || webKitPinchGesture)
+    || Boolean(els.chartScroll?.classList.contains("touch-active"));
+}
+function maybeScheduleDeferredTouchZoomPresentation() {
+  if (!touchZoomSemanticDirty || touchInteractionIsActive()) return;
+  cancelDeferredTouchZoomPresentation();
+  const generation = touchZoomSemanticGeneration;
+  touchZoomSemanticTimer = setTimeout(() => {
+    touchZoomSemanticTimer = 0;
+    if (generation !== touchZoomSemanticGeneration || touchInteractionIsActive()) return;
+
+    // The semantic zoom pass contains layout-reading work. Spread its three
+    // independent measurement phases across frames so a new touch can preempt
+    // between them instead of sitting behind one long main-thread task.
+    applyZoomSemanticVariables();
+    updateAdaptiveTierLabels();
+    touchZoomSemanticFrame = requestAnimationFrame(() => {
+      touchZoomSemanticFrame = 0;
+      if (generation !== touchZoomSemanticGeneration || touchInteractionIsActive()) return;
+      updateUnitCardDetailVisibility();
+      touchZoomSemanticFrame = requestAnimationFrame(() => {
+        touchZoomSemanticFrame = 0;
+        if (generation !== touchZoomSemanticGeneration || touchInteractionIsActive()) return;
+        updateMetaBarLabelVisibility();
+        touchZoomSemanticDirty = false;
+      });
+    });
+  }, TOUCH_ZOOM_SEMANTIC_SETTLE_MS);
+}
+function markTouchZoomSemanticDirty() {
+  touchZoomSemanticDirty = true;
+  maybeScheduleDeferredTouchZoomPresentation();
+}
+function applyZoom() {
+  cancelDeferredTouchZoomPresentation();
+  touchZoomSemanticDirty = false;
+  applyZoomGeometry();
+  applyZoomSemanticPresentation();
 }
 
 function fitToWidth() {
@@ -3401,7 +3549,6 @@ function updateAdaptiveRoadmapPresentation() {
   updateAdaptiveTierLabels();
   updateUnitCardDetailVisibility();
   updateMetaBarLabelVisibility();
-  applyMetaFilters();
 }
 function setMessage(text) {
   if (!text) {
@@ -3482,6 +3629,7 @@ function flushPendingTouchGestureFrame() {
 }
 function beginTouchPan(pointerId, point, alreadyCaptured = false) {
   if (!point) return;
+  cancelDeferredTouchZoomPresentation();
   pendingTouchPanFrame = null;
   touchPanGesture = {
     pointerId,
@@ -3519,11 +3667,13 @@ function commitTouchPinchVisual() {
 
   clearTouchStageTransform();
   zoomScale = nextZoom;
-  applyZoom();
+  applyZoomGeometry();
   els.chartScroll.scrollLeft = targetScrollLeft;
   els.chartScroll.scrollTop = targetScrollTop;
+  markTouchZoomSemanticDirty();
 }
 function beginPinchGestureAt(midpointX, midpointY, distance = 1) {
+  cancelDeferredTouchZoomPresentation();
   flushPendingTouchGestureFrame();
   clearTouchStageTransform();
 
@@ -3562,8 +3712,12 @@ function beginPinchGesture() {
 }
 function markWebKitTouchActive(event) {
   if (!useWebKitNativeGestureInput) return;
-  if ((event.touches?.length || 0) > 0) els.chartScroll.classList.add("touch-active");
-  else els.chartScroll.classList.remove("touch-active");
+  if ((event.touches?.length || 0) > 0) {
+    els.chartScroll.classList.add("touch-active");
+    cancelDeferredTouchZoomPresentation();
+  } else {
+    els.chartScroll.classList.remove("touch-active");
+  }
 }
 function finishWebKitPinchGesture() {
   const hadActivePinch = Boolean(webKitPinchGesture || pinchGesture);
@@ -3574,6 +3728,7 @@ function finishWebKitPinchGesture() {
   clearTouchStageTransform();
   els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
   if (hadActivePinch) suppressTouchClickUntil = performance.now() + 400;
+  maybeScheduleDeferredTouchZoomPresentation();
 }
 function endWebKitTouchActive(event) {
   if (!useWebKitNativeGestureInput) return;
@@ -3584,16 +3739,22 @@ function endWebKitTouchActive(event) {
   if ((event.touches?.length || 0) < 2 && (webKitPinchGesture || pinchGesture)) {
     finishWebKitPinchGesture();
   }
+  if ((event.touches?.length || 0) === 0) maybeScheduleDeferredTouchZoomPresentation();
 }
 function cancelWebKitTouchActive() {
   if (!useWebKitNativeGestureInput) return;
   els.chartScroll.classList.remove("touch-active");
   finishWebKitPinchGesture();
+  maybeScheduleDeferredTouchZoomPresentation();
 }
 
 function beginWebKitPinchGesture(event) {
   if (!useWebKitNativeGestureInput || !isMobileTouchViewport()) return;
   event.preventDefault();
+  // A new native gesture is authoritative. Finalize any orphaned prior preview
+  // before establishing the new baseline, then keep semantic fitting deferred.
+  if (webKitPinchGesture || pinchGesture) finishWebKitPinchGesture();
+  cancelDeferredTouchZoomPresentation();
   suppressTouchClickUntil = performance.now() + 400;
 
   // GestureEvent is independent of the PointerEvent stream that native scrolling
@@ -3774,6 +3935,7 @@ function endTouchGesture(event) {
         beginTouchPan(survivor[0], survivor[1], true);
       } else {
         els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
+        maybeScheduleDeferredTouchZoomPresentation();
       }
       return;
     }
@@ -3791,6 +3953,7 @@ function endTouchGesture(event) {
     clearTouchStageTransform();
     els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
     if (moved) suppressTouchClickUntil = performance.now() + 400;
+    maybeScheduleDeferredTouchZoomPresentation();
     return;
   }
 
@@ -3801,6 +3964,7 @@ function endTouchGesture(event) {
     pendingTouchPanFrame = null;
     clearTouchStageTransform();
     els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
+    maybeScheduleDeferredTouchZoomPresentation();
   }
 }
 
@@ -3843,6 +4007,7 @@ function recoverInterruptedPointerInteractions() {
     panDrag = null;
     els.chartScroll.classList.remove("panning");
   }
+  maybeScheduleDeferredTouchZoomPresentation();
 }
 
 function beginPan(event) {
