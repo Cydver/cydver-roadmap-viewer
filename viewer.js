@@ -75,6 +75,8 @@ let pairedPilotByMsId = new Map();
 let profileTimelineCache = [];
 let profileTimelineIndexById = new Map();
 const profileImageWarmCache = new Map();
+const mobileProfileGridCache = new Map();
+const MOBILE_PROFILE_GRID_CACHE_LIMIT = 7;
 let profileImageWarmupGeneration = 0;
 let profileNeighborWarmupHandle = 0;
 let profileNeighborWarmupGeneration = 0;
@@ -115,6 +117,8 @@ let touchGestureFrame = 0;
 let pendingTouchPanFrame = null;
 let pendingTouchPinchFrame = null;
 let touchSelectionTapCandidate = null;
+let mobileCameraX = 0;
+let mobileCameraY = 0;
 let suppressTouchClickUntil = 0;
 let lastInputModality = "pointer";
 let profileReturnFocusByKeyboard = false;
@@ -285,7 +289,12 @@ function scheduleProfileNeighborWarmup(unit) {
   const run = () => {
     profileNeighborWarmupHandle = 0;
     if (generation !== profileNeighborWarmupGeneration || !unitProfileOverlay) return;
-    neighbours.forEach(candidate => warmProfilePairImages(candidate, "auto"));
+    neighbours.forEach(candidate => {
+      // Building the cached immutable profile grid is enough to start the
+      // browser resource fetch. Avoid a second Image/decode pipeline competing
+      // with the profile the user is actively navigating.
+      prepareMobileProfileGrid(candidate);
+    });
   };
 
   if (typeof requestIdleCallback === "function") {
@@ -461,7 +470,6 @@ function bindControls() {
   els.chartScroll.classList.remove("webkit-native-gesture-input");
 
   els.chartScroll.addEventListener("pointerdown", beginTouchGesture);
-  els.chartScroll.addEventListener("lostpointercapture", handleLostTouchPointerCapture);
   els.roadmap.addEventListener("lostpointercapture", handleLostPanPointerCapture);
   window.addEventListener("pointermove", movePan);
   window.addEventListener("pointerup", endPan);
@@ -1741,9 +1749,11 @@ function profileTagsHtml(unit) {
 
 function bindProfileTagTooltips(root) {
   root?.querySelectorAll(".unit-profile-tag[data-profile-tag]").forEach(chip => {
+    if (chip.dataset.profileTooltipBound === "true") return;
     const tag = chip.dataset.profileTag || "";
     const description = tagDescription(tag);
     if (!description) return;
+    chip.dataset.profileTooltipBound = "true";
     bindAppTooltip(chip, () => `<h3>${escapeHtml(tag)}</h3><div class="app-tooltip-description">${multilineHtml(description)}</div>`);
   });
 }
@@ -1768,6 +1778,8 @@ function profileAltemaLinkHtml(unit) {
 
 function bindProfileAltemaTooltips(root) {
   root?.querySelectorAll("[data-profile-altema-link]").forEach(link => {
+    if (link.dataset.profileTooltipBound === "true") return;
+    link.dataset.profileTooltipBound = "true";
     let suppressUntilPointerLeaves = false;
     const tooltipHtml = () => `<strong>See on Altema</strong>`;
     const showSourceTooltip = event => {
@@ -1832,7 +1844,7 @@ function profileMetaHtml(unit, activeSegmentId = null) {
     const labelAttrs = description
       ? ` class="unit-profile-meta-label has-description" data-meta-label="${escapeAttr(status.label)}" data-meta-description="${escapeAttr(description)}" tabindex="0" role="button" aria-label="${escapeAttr(`${status.label}: ${description}`)}"`
       : ` class="unit-profile-meta-label"`;
-    return `<div class="unit-profile-meta-row${activeSegmentId === seg.id ? " active" : ""}"><i style="background:${escapeAttr(status.color)}"></i><div class="unit-profile-meta-copy"><div class="unit-profile-meta-top"><strong${labelAttrs}>${escapeHtml(status.label)}</strong><span>${escapeHtml(formatWeekRange(seg.start, seg.end))}</span></div></div></div>`;
+    return `<div class="unit-profile-meta-row${activeSegmentId === seg.id ? " active" : ""}" data-profile-segment-id="${escapeAttr(seg.id)}"><i style="background:${escapeAttr(status.color)}"></i><div class="unit-profile-meta-copy"><div class="unit-profile-meta-top"><strong${labelAttrs}>${escapeHtml(status.label)}</strong><span>${escapeHtml(formatWeekRange(seg.start, seg.end))}</span></div></div></div>`;
   }).join("");
   return `<section class="unit-profile-section unit-profile-meta-section"><div class="unit-profile-section-title">PVP Meta</div><div class="unit-profile-meta-list">${rows}</div></section>`;
 }
@@ -1848,6 +1860,8 @@ function profileScrollableNotesHtml(title, text, emptyText, extraClass = "", exp
 
 function bindProfileMetaTooltips(root) {
   root?.querySelectorAll(".unit-profile-meta-label[data-meta-description]").forEach(label => {
+    if (label.dataset.profileTooltipBound === "true") return;
+    label.dataset.profileTooltipBound = "true";
     const metaLabel = label.dataset.metaLabel || label.textContent || "PVP Meta";
     const description = label.dataset.metaDescription || "";
     const htmlFactory = () => `<h3>${escapeHtml(metaLabel)}</h3><div class="app-tooltip-description">${multilineHtml(description)}</div>`;
@@ -1958,11 +1972,14 @@ function bindProfileNoteReaders(root, generation = unitProfileBindingGeneration)
 
   sections.forEach(section => {
     const button = section.querySelector(".unit-profile-note-expand");
-    button?.addEventListener("click", event => {
-      event.stopPropagation();
-      const copy = section.querySelector(".unit-profile-note-copy");
-      openUnitNoteReader(section.dataset.noteTitle || "Notes", copy?.innerText || copy?.textContent || "", button);
-    });
+    if (button && button.dataset.profileReaderBound !== "true") {
+      button.dataset.profileReaderBound = "true";
+      button.addEventListener("click", event => {
+        event.stopPropagation();
+        const copy = section.querySelector(".unit-profile-note-copy");
+        openUnitNoteReader(section.dataset.noteTitle || "Notes", copy?.innerText || copy?.textContent || "", button);
+      });
+    }
   });
 
   if (typeof ResizeObserver === "function") {
@@ -1985,7 +2002,12 @@ function bindProfileNoteReaders(root, generation = unitProfileBindingGeneration)
     sections.forEach(updateSection);
   };
   requestAnimationFrame(() => requestAnimationFrame(updateAll));
-  scheduleUnitProfileBindingTimeout(updateAll, 120, generation, root);
+  // On mobile, ResizeObserver already catches late layout/image changes and the
+  // double-rAF handles the initial settle. Avoid leaving an extra delayed
+  // layout-read timer competing with rapid profile navigation.
+  if (!isMobileTouchViewport() || typeof ResizeObserver !== "function") {
+    scheduleUnitProfileBindingTimeout(updateAll, 120, generation, root);
+  }
 }
 
 
@@ -2140,6 +2162,92 @@ function unitProfileGridHtml(ms, pilot, activeId) {
     </section>`;
 }
 
+function unitProfileGridClass(ms) {
+  return `unit-profile-grid unit-profile-grid-lshape${ms && (ms.segments || []).length >= 5 ? " meta-very-dense" : ms && (ms.segments || []).length >= 3 ? " meta-dense" : ""}`;
+}
+
+function setUnitProfileGridActiveSegment(grid, activeId = null) {
+  if (!grid) return;
+  grid.querySelectorAll(".unit-profile-meta-row[data-profile-segment-id]").forEach(row => {
+    row.classList.toggle("active", Boolean(activeId) && row.dataset.profileSegmentId === activeId);
+  });
+}
+
+function bindUnitProfileImageFallbacks(root) {
+  root?.querySelectorAll(".unit-profile-image").forEach(img => {
+    if (img.dataset.profileImageBound === "true") return;
+    img.dataset.profileImageBound = "true";
+    img.addEventListener("error", () => {
+      img.style.display = "none";
+      const fallback = img.nextElementSibling;
+      if (fallback) fallback.classList.remove("image-fallback");
+    }, { once: true });
+  });
+}
+
+function trimMobileProfileGridCache() {
+  while (mobileProfileGridCache.size > MOBILE_PROFILE_GRID_CACHE_LIMIT) {
+    let removed = false;
+    for (const [key, grid] of mobileProfileGridCache) {
+      if (grid?.isConnected) continue;
+      mobileProfileGridCache.delete(key);
+      removed = true;
+      break;
+    }
+    if (!removed) break;
+  }
+}
+
+function rememberMobileProfileGrid(ownerId, grid) {
+  if (!ownerId || !grid) return grid;
+  mobileProfileGridCache.delete(ownerId);
+  mobileProfileGridCache.set(ownerId, grid);
+  trimMobileProfileGridCache();
+  return grid;
+}
+
+function buildMobileProfileGrid(ms, pilot, ownerId, { background = false } = {}) {
+  const grid = document.createElement("div");
+  grid.className = unitProfileGridClass(ms);
+  grid.dataset.profileOwnerId = ownerId;
+  grid.innerHTML = unitProfileGridHtml(ms, pilot, null);
+  bindUnitProfileImageFallbacks(grid);
+  if (background) {
+    grid.querySelectorAll(".unit-profile-image").forEach(img => {
+      try { img.fetchPriority = "low"; } catch {}
+    });
+  }
+  return rememberMobileProfileGrid(ownerId, grid);
+}
+
+function mobileProfileGridFor(ms, pilot, ownerId, activeId = null, options = {}) {
+  let grid = mobileProfileGridCache.get(ownerId) || null;
+  if (grid) {
+    mobileProfileGridCache.delete(ownerId);
+    mobileProfileGridCache.set(ownerId, grid);
+  } else {
+    grid = buildMobileProfileGrid(ms, pilot, ownerId, options);
+  }
+  grid.className = unitProfileGridClass(ms);
+  setUnitProfileGridActiveSegment(grid, activeId);
+  grid.querySelectorAll(".unit-profile-note-scroll").forEach(scroller => { scroller.scrollTop = 0; });
+  if (!options.background) {
+    grid.querySelectorAll(".unit-profile-image").forEach(img => {
+      try { img.fetchPriority = "high"; } catch {}
+    });
+  }
+  return grid;
+}
+
+function prepareMobileProfileGrid(unit) {
+  if (!isMobileTouchViewport() || !unit) return;
+  const ms = isMs(unit) ? unit : pairedMsForPilot(unit);
+  const pilot = isPilot(unit) ? unit : pairedPilotForMs(unit);
+  const ownerId = ms?.id || unit.id;
+  if (!ownerId || mobileProfileGridCache.has(ownerId)) return;
+  mobileProfileGridFor(ms, pilot, ownerId, null, { background: true });
+}
+
 function resetUnitProfileContentBindings() {
   unitProfileBindingGeneration += 1;
   if (unitProfileBindingFrame) {
@@ -2165,6 +2273,14 @@ function scheduleUnitProfileBindingTimeout(callback, delay, generation, root) {
 
 function scheduleUnitProfileContentBindings(overlay) {
   const generation = unitProfileBindingGeneration;
+  if (isMobileTouchViewport()) {
+    unitProfileBindingFrame = requestAnimationFrame(() => {
+      unitProfileBindingFrame = 0;
+      if (generation !== unitProfileBindingGeneration || unitProfileOverlay !== overlay || !overlay.isConnected) return;
+      bindProfileNoteReaders(overlay, generation);
+    });
+    return;
+  }
   unitProfileBindingFrame = requestAnimationFrame(() => {
     unitProfileBindingFrame = requestAnimationFrame(() => {
       unitProfileBindingFrame = 0;
@@ -2205,22 +2321,25 @@ function updateUnitProfileContent(overlay, unitId, activeSegmentId = null) {
   const card = overlay.querySelector(".unit-profile-card");
   overlay.setAttribute("aria-label", ms?.name || pilot?.name || "Unit profile");
   card?.setAttribute("aria-label", ms?.name || pilot?.name || "Unit profile");
-  const grid = overlay.querySelector(".unit-profile-grid");
+  let grid = overlay.querySelector(".unit-profile-grid");
   if (!grid) return null;
-  grid.className = `unit-profile-grid unit-profile-grid-lshape${ms && (ms.segments || []).length >= 5 ? " meta-very-dense" : ms && (ms.segments || []).length >= 3 ? " meta-dense" : ""}`;
-  grid.innerHTML = unitProfileGridHtml(ms, pilot, activeId);
+  if (isMobileTouchViewport()) {
+    const ownerId = ms?.id || clicked.id;
+    const targetGrid = mobileProfileGridFor(ms, pilot, ownerId, activeId);
+    if (targetGrid !== grid) {
+      grid.replaceWith(targetGrid);
+      grid = targetGrid;
+    }
+  } else {
+    grid.className = unitProfileGridClass(ms);
+    grid.innerHTML = unitProfileGridHtml(ms, pilot, activeId);
+    bindUnitProfileImageFallbacks(grid);
+  }
   if (card) card.scrollTop = 0;
 
-  overlay.querySelectorAll(".unit-profile-image").forEach(img => {
-    img.addEventListener("error", () => {
-      img.style.display = "none";
-      const fallback = img.nextElementSibling;
-      if (fallback) fallback.classList.remove("image-fallback");
-    }, { once: true });
-  });
-  bindProfileTagTooltips(overlay);
-  bindProfileMetaTooltips(overlay);
-  bindProfileAltemaTooltips(overlay);
+  bindProfileTagTooltips(grid);
+  bindProfileMetaTooltips(grid);
+  bindProfileAltemaTooltips(grid);
   scheduleUnitProfileContentBindings(overlay);
   setMetaOwnerProfile(ms?.id || null);
   scheduleProfileNeighborWarmup(ms);
@@ -2261,25 +2380,30 @@ function queuedProfileNavigationTarget(overlay, direction) {
 function queueMobileUnitProfileNavigation(overlay, direction) {
   const targetId = queuedProfileNavigationTarget(overlay, direction);
   if (!targetId) return;
+
+  // Never delay the first touch response. Apply one destination immediately, then
+  // collapse any additional taps that arrive before the next paint into one trailing
+  // destination. This preserves direct manipulation while preventing obsolete profile
+  // rebuilds from accumulating under button spam on a slower mobile main thread.
+  if (!unitProfileNavigationFrame) {
+    applyUnitProfileNavigationTarget(overlay, targetId, direction);
+    unitProfileNavigationFrame = requestAnimationFrame(() => {
+      unitProfileNavigationFrame = 0;
+      const currentOverlay = unitProfileOverlay;
+      const pendingId = unitProfilePendingNavigationId;
+      unitProfilePendingNavigationId = null;
+      if (!currentOverlay || currentOverlay !== overlay || !pendingId || pendingId === currentOverlay.dataset.currentMsId) return;
+      applyUnitProfileNavigationTarget(currentOverlay, pendingId, 0);
+    });
+    return;
+  }
   unitProfilePendingNavigationId = targetId;
-  if (unitProfileNavigationFrame) return;
-  unitProfileNavigationFrame = requestAnimationFrame(() => {
-    unitProfileNavigationFrame = 0;
-    const currentOverlay = unitProfileOverlay;
-    const pendingId = unitProfilePendingNavigationId;
-    unitProfilePendingNavigationId = null;
-    if (!currentOverlay || currentOverlay !== overlay || !pendingId || pendingId === currentOverlay.dataset.currentMsId) return;
-    applyUnitProfileNavigationTarget(currentOverlay, pendingId, direction);
-  });
 }
 
 function navigateUnitProfile(direction) {
   if (!unitProfileOverlay) return;
   const overlay = unitProfileOverlay;
 
-  // Desktop/keyboard navigation was already immediate and inexpensive. On touch,
-  // coalesce a burst to the latest requested MS so obsolete DOM/style/layout work
-  // cannot queue behind rapid taps on a slower mobile main thread.
   if (isMobileTouchViewport() && lastInputModality === "touch") {
     queueMobileUnitProfileNavigation(overlay, direction);
     return;
@@ -2553,8 +2677,37 @@ function addDiv(className, style = {}) {
 function isMobileTouchViewport() {
   return Boolean(window.matchMedia?.("(pointer: coarse)")?.matches);
 }
+function useMobileTransformCamera() {
+  return isMobileTouchViewport();
+}
 function minimumZoom() {
   return isMobileTouchViewport() ? MOBILE_MIN_ZOOM : MIN_ZOOM;
+}
+function mobileCameraBounds(scale = zoomScale) {
+  const viewportWidth = Math.max(0, els.chartScroll?.clientWidth || 0);
+  const viewportHeight = Math.max(0, els.chartScroll?.clientHeight || 0);
+  const contentWidth = baseChartWidth() * scale;
+  const contentHeight = baseChartHeight() * scale;
+  return {
+    minX: Math.min(0, viewportWidth - contentWidth),
+    maxX: 0,
+    minY: Math.min(0, viewportHeight - contentHeight),
+    maxY: 0
+  };
+}
+function clampMobileCamera(x = mobileCameraX, y = mobileCameraY, scale = zoomScale) {
+  const bounds = mobileCameraBounds(scale);
+  return {
+    x: clamp(Number(x) || 0, bounds.minX, bounds.maxX),
+    y: clamp(Number(y) || 0, bounds.minY, bounds.maxY)
+  };
+}
+function applyMobileCameraTransform(x = mobileCameraX, y = mobileCameraY, scale = zoomScale) {
+  if (!els.chartStage) return;
+  const camera = clampMobileCamera(x, y, scale);
+  mobileCameraX = camera.x;
+  mobileCameraY = camera.y;
+  els.chartStage.style.transform = `translate3d(${mobileCameraX}px, ${mobileCameraY}px, 0) scale(${scale})`;
 }
 
 function setZoom(value) {
@@ -2569,6 +2722,16 @@ function setZoomAtClientPoint(value, clientX, clientY) {
   const rect = els.chartScroll.getBoundingClientRect();
   const localX = clientX - rect.left;
   const localY = clientY - rect.top;
+  if (useMobileTransformCamera()) {
+    const contentX = (localX - mobileCameraX) / oldZoom;
+    const contentY = (localY - mobileCameraY) / oldZoom;
+    zoomScale = nextZoom;
+    const camera = clampMobileCamera(localX - contentX * nextZoom, localY - contentY * nextZoom, nextZoom);
+    mobileCameraX = camera.x;
+    mobileCameraY = camera.y;
+    applyZoom();
+    return;
+  }
   const contentX = (els.chartScroll.scrollLeft + localX) / oldZoom;
   const contentY = (els.chartScroll.scrollTop + localY) / oldZoom;
   setZoom(nextZoom);
@@ -2589,9 +2752,22 @@ function handleWheelZoom(event) {
 function applyZoomGeometry() {
   const width = baseChartWidth();
   const height = baseChartHeight();
-  els.roadmap.style.transform = `scale(${zoomScale})`;
-  els.chartStage.style.width = `${width * zoomScale}px`;
-  els.chartStage.style.height = `${height * zoomScale}px`;
+  if (useMobileTransformCamera()) {
+    // Mobile owns navigation as a single transform camera. Do not bounce between
+    // CSS transforms and hidden scroll offsets at gesture boundaries. Keeping the
+    // camera in one coordinate system avoids scroll-tree/compositor handoffs on iOS.
+    els.roadmap.style.transform = "";
+    els.chartStage.style.width = `${width}px`;
+    els.chartStage.style.height = `${height}px`;
+    if (els.chartScroll.scrollLeft) els.chartScroll.scrollLeft = 0;
+    if (els.chartScroll.scrollTop) els.chartScroll.scrollTop = 0;
+    applyMobileCameraTransform(mobileCameraX, mobileCameraY, zoomScale);
+  } else {
+    els.chartStage.style.transform = "";
+    els.roadmap.style.transform = `scale(${zoomScale})`;
+    els.chartStage.style.width = `${width * zoomScale}px`;
+    els.chartStage.style.height = `${height * zoomScale}px`;
+  }
   if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
 }
 function applyZoomSemanticVariables() {
@@ -3344,6 +3520,7 @@ function computePairedPilotForMs(ms) {
     })[0] || null;
 }
 function rebuildStaticRuntimeIndices() {
+  mobileProfileGridCache.clear();
   const units = state.units || [];
   const msUnits = [];
   const pilots = [];
@@ -3796,7 +3973,8 @@ function touchPairGeometry() {
 }
 function clearTouchStageTransform() {
   if (!els.chartStage) return;
-  els.chartStage.style.transform = "";
+  if (useMobileTransformCamera()) applyMobileCameraTransform();
+  else els.chartStage.style.transform = "";
 }
 function scheduleTouchGestureFrame() {
   if (touchGestureFrame) return;
@@ -3805,21 +3983,33 @@ function scheduleTouchGestureFrame() {
 function applyPinchPreviewFrame(frame) {
   if (!frame || !pinchGesture) return;
   const nextZoom = clamp(Number(frame.zoom) || zoomScale, minimumZoom(), MAX_ZOOM);
-  const ratio = nextZoom / pinchGesture.startZoom;
   const localX = frame.midpointX - pinchGesture.rectLeft;
   const localY = frame.midpointY - pinchGesture.rectTop;
+
+  if (useMobileTransformCamera()) {
+    const camera = clampMobileCamera(
+      localX - pinchGesture.anchorContentX * nextZoom,
+      localY - pinchGesture.anchorContentY * nextZoom,
+      nextZoom
+    );
+    mobileCameraX = camera.x;
+    mobileCameraY = camera.y;
+    els.chartStage.style.transform = `translate3d(${camera.x}px, ${camera.y}px, 0) scale(${nextZoom})`;
+    pinchGesture.finalZoom = nextZoom;
+    pinchGesture.targetCameraX = camera.x;
+    pinchGesture.targetCameraY = camera.y;
+    if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(nextZoom * 100)}%`;
+    return;
+  }
+
+  const ratio = nextZoom / pinchGesture.startZoom;
   const maxScrollLeft = Math.max(0, pinchGesture.baseWidth * nextZoom - pinchGesture.viewportWidth);
   const maxScrollTop = Math.max(0, pinchGesture.baseHeight * nextZoom - pinchGesture.viewportHeight);
   const targetScrollLeft = clamp(pinchGesture.anchorStageX * ratio - localX, 0, maxScrollLeft);
   const targetScrollTop = clamp(pinchGesture.anchorStageY * ratio - localY, 0, maxScrollTop);
-
-  // Live pinch is compositor-only: transform the already-rendered stage. The real
-  // roadmap scale, stage dimensions, scroll offsets, and semantic measurements are
-  // committed once the pinch ends.
   const translateX = pinchGesture.startScrollLeft - targetScrollLeft;
   const translateY = pinchGesture.startScrollTop - targetScrollTop;
   els.chartStage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0) scale(${ratio})`;
-
   pinchGesture.finalZoom = nextZoom;
   pinchGesture.targetScrollLeft = targetScrollLeft;
   pinchGesture.targetScrollTop = targetScrollTop;
@@ -3837,6 +4027,15 @@ function flushTouchGestureFrame() {
   if (pendingTouchPanFrame && touchPanGesture) {
     const frame = pendingTouchPanFrame;
     pendingTouchPanFrame = null;
+    if (useMobileTransformCamera()) {
+      const camera = clampMobileCamera(frame.x, frame.y, zoomScale);
+      mobileCameraX = camera.x;
+      mobileCameraY = camera.y;
+      els.chartStage.style.transform = `translate3d(${camera.x}px, ${camera.y}px, 0) scale(${zoomScale})`;
+      touchPanGesture.targetCameraX = camera.x;
+      touchPanGesture.targetCameraY = camera.y;
+      return;
+    }
     const translateX = touchPanGesture.startScrollLeft - frame.scrollLeft;
     const translateY = touchPanGesture.startScrollTop - frame.scrollTop;
     els.chartStage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0)`;
@@ -3851,10 +4050,23 @@ function flushPendingTouchGestureFrame() {
   }
   flushTouchGestureFrame();
 }
-function beginTouchPan(pointerId, point, alreadyCaptured = false) {
+function beginTouchPan(pointerId, point) {
   if (!point) return;
   cancelDeferredTouchZoomPresentation();
   pendingTouchPanFrame = null;
+  if (useMobileTransformCamera()) {
+    touchPanGesture = {
+      pointerId,
+      startX: point.x,
+      startY: point.y,
+      startCameraX: mobileCameraX,
+      startCameraY: mobileCameraY,
+      targetCameraX: mobileCameraX,
+      targetCameraY: mobileCameraY,
+      moved: false
+    };
+    return;
+  }
   touchPanGesture = {
     pointerId,
     startX: point.x,
@@ -3865,13 +4077,18 @@ function beginTouchPan(pointerId, point, alreadyCaptured = false) {
     targetScrollTop: els.chartScroll.scrollTop,
     maxScrollLeft: Math.max(0, baseChartWidth() * zoomScale - els.chartScroll.clientWidth),
     maxScrollTop: Math.max(0, baseChartHeight() * zoomScale - els.chartScroll.clientHeight),
-    moved: false,
-    captured: alreadyCaptured
+    moved: false
   };
 }
 function commitTouchPanVisual() {
   if (!touchPanGesture) return;
   flushPendingTouchGestureFrame();
+  if (useMobileTransformCamera()) {
+    mobileCameraX = Number.isFinite(touchPanGesture.targetCameraX) ? touchPanGesture.targetCameraX : touchPanGesture.startCameraX;
+    mobileCameraY = Number.isFinite(touchPanGesture.targetCameraY) ? touchPanGesture.targetCameraY : touchPanGesture.startCameraY;
+    applyMobileCameraTransform(mobileCameraX, mobileCameraY, zoomScale);
+    return;
+  }
   const targetScrollLeft = Number.isFinite(touchPanGesture.targetScrollLeft)
     ? touchPanGesture.targetScrollLeft
     : touchPanGesture.startScrollLeft;
@@ -3886,9 +4103,17 @@ function commitTouchPinchVisual() {
   if (!pinchGesture) return;
   flushPendingTouchGestureFrame();
   const nextZoom = clamp(Number(pinchGesture.finalZoom) || pinchGesture.startZoom, minimumZoom(), MAX_ZOOM);
+  if (useMobileTransformCamera()) {
+    zoomScale = nextZoom;
+    mobileCameraX = Number.isFinite(pinchGesture.targetCameraX) ? pinchGesture.targetCameraX : mobileCameraX;
+    mobileCameraY = Number.isFinite(pinchGesture.targetCameraY) ? pinchGesture.targetCameraY : mobileCameraY;
+    applyMobileCameraTransform(mobileCameraX, mobileCameraY, zoomScale);
+    if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
+    markTouchZoomSemanticDirty();
+    return;
+  }
   const targetScrollLeft = Number.isFinite(pinchGesture.targetScrollLeft) ? pinchGesture.targetScrollLeft : pinchGesture.startScrollLeft;
   const targetScrollTop = Number.isFinite(pinchGesture.targetScrollTop) ? pinchGesture.targetScrollTop : pinchGesture.startScrollTop;
-
   clearTouchStageTransform();
   zoomScale = nextZoom;
   applyZoomGeometry();
@@ -3913,6 +4138,10 @@ function beginPinchGestureAt(midpointX, midpointY, distance = 1) {
     startZoom: zoomScale,
     startScrollLeft,
     startScrollTop,
+    startCameraX: mobileCameraX,
+    startCameraY: mobileCameraY,
+    anchorContentX: useMobileTransformCamera() ? (localX - mobileCameraX) / zoomScale : null,
+    anchorContentY: useMobileTransformCamera() ? (localY - mobileCameraY) / zoomScale : null,
     anchorStageX: startScrollLeft + localX,
     anchorStageY: startScrollTop + localY,
     rectLeft: rect.left,
@@ -3924,6 +4153,8 @@ function beginPinchGestureAt(midpointX, midpointY, distance = 1) {
     finalZoom: zoomScale,
     targetScrollLeft: startScrollLeft,
     targetScrollTop: startScrollTop,
+    targetCameraX: mobileCameraX,
+    targetCameraY: mobileCameraY,
     moved: false
   };
   pendingTouchPinchFrame = null;
@@ -4053,7 +4284,7 @@ function beginTouchGesture(event) {
   // which avoids the browser cancelling the first pointer when a native pan has
   // already started before the second finger lands.
   if (touchPoints.size === 1) {
-    beginTouchPan(event.pointerId, point, false);
+    beginTouchPan(event.pointerId, point);
     return;
   }
 
@@ -4064,12 +4295,7 @@ function beginTouchGesture(event) {
       touchPanGesture = null;
       pendingTouchPanFrame = null;
     }
-    for (const pointerId of touchPoints.keys()) {
-      try { els.chartScroll.setPointerCapture(pointerId); } catch {}
-    }
     beginPinchGesture();
-  } else {
-    try { els.chartScroll.setPointerCapture(event.pointerId); } catch {}
   }
   suppressTouchClickUntil = performance.now() + 400;
   event.preventDefault();
@@ -4118,17 +4344,16 @@ function moveTouchGesture(event) {
   if (!touchPanGesture.moved) {
     touchPanGesture.moved = true;
     els.chartScroll.classList.add("touch-gesturing");
-    if (!touchPanGesture.captured) {
-      try {
-        els.chartScroll.setPointerCapture(event.pointerId);
-        touchPanGesture.captured = true;
-      } catch {}
-    }
   }
-  pendingTouchPanFrame = {
-    scrollLeft: clamp(touchPanGesture.startScrollLeft - dx, 0, touchPanGesture.maxScrollLeft),
-    scrollTop: clamp(touchPanGesture.startScrollTop - dy, 0, touchPanGesture.maxScrollTop)
-  };
+  pendingTouchPanFrame = useMobileTransformCamera()
+    ? {
+        x: touchPanGesture.startCameraX + dx,
+        y: touchPanGesture.startCameraY + dy
+      }
+    : {
+        scrollLeft: clamp(touchPanGesture.startScrollLeft - dx, 0, touchPanGesture.maxScrollLeft),
+        scrollTop: clamp(touchPanGesture.startScrollTop - dy, 0, touchPanGesture.maxScrollTop)
+      };
   suppressTouchClickUntil = performance.now() + 400;
   scheduleTouchGestureFrame();
   event.preventDefault();
@@ -4148,7 +4373,6 @@ function endTouchGesture(event) {
   if (pinchGesture) {
     flushPendingTouchGestureFrame();
     touchPoints.delete(event.pointerId);
-    try { els.chartScroll.releasePointerCapture(event.pointerId); } catch {}
 
     if (touchPoints.size < 2) {
       const moved = Boolean(pinchGesture.moved);
@@ -4162,7 +4386,7 @@ function endTouchGesture(event) {
       // forcing the user to lift both fingers and start a brand-new gesture.
       const survivor = [...touchPoints.entries()][0];
       if (survivor) {
-        beginTouchPan(survivor[0], survivor[1], true);
+        beginTouchPan(survivor[0], survivor[1]);
       } else {
         els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
         maybeScheduleDeferredTouchZoomPresentation();
@@ -4179,7 +4403,6 @@ function endTouchGesture(event) {
     touchPanGesture = null;
     pendingTouchPanFrame = null;
     touchPoints.delete(event.pointerId);
-    try { els.chartScroll.releasePointerCapture(event.pointerId); } catch {}
     clearTouchStageTransform();
     els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
     if (moved) suppressTouchClickUntil = performance.now() + 400;
@@ -4188,7 +4411,6 @@ function endTouchGesture(event) {
   }
 
   touchPoints.delete(event.pointerId);
-  try { els.chartScroll.releasePointerCapture(event.pointerId); } catch {}
   if (!touchPoints.size) {
     touchPanGesture = null;
     pendingTouchPanFrame = null;
@@ -4198,12 +4420,6 @@ function endTouchGesture(event) {
   }
 }
 
-function handleLostTouchPointerCapture(event) {
-  if (useWebKitNativeGestureInput || event.pointerType !== "touch" || !touchPoints.has(event.pointerId)) return;
-  // Pointer capture can be lost for reasons other than the normal pointerup path.
-  // Treat an unexpected loss as cancellation so no gesture state survives it.
-  endTouchGesture(event);
-}
 function handleLostPanPointerCapture(event) {
   if (!panDrag || event.pointerId !== panDrag.pointerId) return;
   endPan(event);
@@ -4217,9 +4433,6 @@ function recoverInterruptedPointerInteractions({ schedulePresentation = true } =
   } else {
     if (pinchGesture) commitTouchPinchVisual();
     else if (touchPanGesture) commitTouchPanVisual();
-    for (const pointerId of touchPoints.keys()) {
-      try { els.chartScroll.releasePointerCapture(pointerId); } catch {}
-    }
     touchPoints.clear();
     touchPanGesture = null;
     pinchGesture = null;

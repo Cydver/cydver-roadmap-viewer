@@ -3967,6 +3967,10 @@ body {
     min-width: 44px;
     min-height: 52px;
     touch-action: manipulation;
+    /* Keep the moving control on the same lightweight composited surface as
+       the profile shell; mobile does not need a live backdrop blur here. */
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
   .unit-profile-nav-prev {
     left: max(6px, calc(env(safe-area-inset-left) + 4px));
@@ -4092,19 +4096,8 @@ body {
   .pull-calc-pity-field > span {
     margin-top: 0;
   }
-  .unit-profile-tag.has-description {
-    min-width: 44px;
-    min-height: 44px;
-  }
   .unit-profile-source-link {
-    width: 44px;
-    height: 44px;
-    flex-basis: 44px;
-    transform: none;
     touch-action: manipulation;
-  }
-  .unit-profile-source-link:hover {
-    transform: none;
   }
 }
 
@@ -4133,17 +4126,21 @@ body {
     height: 0;
   }
 
+  .chart-stage {
+    will-change: transform;
+    backface-visibility: hidden;
+  }
   .legend-status-control {
     display: flex;
     position: relative;
     min-width: 0;
-    min-height: 44px;
+    min-height: 32px;
   }
   .legend-status-control .legend-item {
     flex: 1 1 auto;
     min-width: 0;
-    min-height: 44px;
-    border-radius: 7px;
+    min-height: 32px;
+    border-radius: 6px;
     cursor: pointer;
     touch-action: manipulation;
   }
@@ -4161,19 +4158,19 @@ body {
   .legend-info {
     display: inline-grid;
     place-items: center;
-    flex: 0 0 44px;
-    width: 44px;
-    min-width: 44px;
-    height: 44px;
-    min-height: 44px;
+    flex: 0 0 30px;
+    width: 30px;
+    min-width: 30px;
+    height: 32px;
+    min-height: 32px;
     margin: 0;
     padding: 0;
-    border: 1px solid rgba(255,255,255,.12);
+    border: 1px solid rgba(255,255,255,.1);
     border-left: 0;
-    border-radius: 0 7px 7px 0;
-    background: rgba(255,255,255,.025);
+    border-radius: 0 6px 6px 0;
+    background: rgba(255,255,255,.018);
     color: #9fc9d8;
-    font: 850 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font: 850 9px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     cursor: pointer;
     touch-action: manipulation;
   }
@@ -4187,7 +4184,7 @@ body {
    multi-line legend consuming nearly half of the viewport. */
 @media (orientation: portrait) and (max-width: 600px) and (pointer: coarse) {
   .app-shell {
-    grid-template-rows: 48px auto minmax(0, 1fr);
+    grid-template-rows: 44px auto minmax(0, 1fr);
     gap: 5px;
     padding-top: max(5px, env(safe-area-inset-top));
     padding-right: max(5px, env(safe-area-inset-right));
@@ -4196,8 +4193,8 @@ body {
   }
 
   .topbar {
-    min-height: 48px;
-    height: 48px;
+    min-height: 44px;
+    height: 44px;
     padding: 2px 4px 2px 9px;
     flex-direction: row;
     align-items: center;
@@ -4228,10 +4225,13 @@ body {
   .viewer-controls .viewer-utility-action {
     width: auto;
     min-width: 88px;
-    height: 44px;
-    min-height: 44px;
-    padding-inline: 10px !important;
+    height: 40px;
+    min-height: 40px;
+    padding: 6px 9px 6px 27px !important;
     font-size: 10px;
+  }
+  .viewer-controls .viewer-utility-action::before {
+    left: 9px;
   }
 
   .legend-panel {
@@ -4255,12 +4255,14 @@ body {
   }
   .legend-status-control {
     width: 100%;
-    height: 44px;
+    height: 36px;
+    min-height: 36px;
   }
   .legend-status-control .legend-item {
     width: auto;
-    height: 44px;
-    padding: 4px;
+    height: 36px;
+    min-height: 36px;
+    padding: 3px 4px;
     gap: 3px;
     font-size: 8.25px;
     line-height: 1.05;
@@ -4281,9 +4283,11 @@ body {
     border-radius: 50%;
   }
   .legend-info {
-    flex-basis: 44px;
-    width: 44px;
-    min-width: 44px;
+    flex-basis: 30px;
+    width: 30px;
+    min-width: 30px;
+    height: 36px;
+    min-height: 36px;
   }
   .legend-filter-controls {
     grid-column: auto;
@@ -4294,9 +4298,9 @@ body {
   #btnCustomUnitFilter {
     width: 100%;
     min-width: 0;
-    height: 44px;
-    min-height: 44px;
-    padding: 5px 6px !important;
+    height: 36px;
+    min-height: 36px;
+    padding: 4px 6px !important;
     font-size: 9px;
   }
   .legend-filter-hint { display: none !important; }
@@ -4342,8 +4346,8 @@ body {
 @media (orientation: landscape) and (max-height: 600px) and (pointer: coarse) {
   .app-shell {
     height: 100dvh;
-    grid-template-columns: clamp(136px, 18vw, 156px) minmax(0, 1fr);
-    grid-template-rows: 50px minmax(0, 1fr);
+    grid-template-columns: clamp(132px, 17vw, 150px) minmax(0, 1fr);
+    grid-template-rows: 42px minmax(0, 1fr);
     gap: 5px;
     padding-top: max(4px, env(safe-area-inset-top));
     padding-right: max(4px, env(safe-area-inset-right));
@@ -4355,8 +4359,8 @@ body {
     grid-column: 1;
     grid-row: 1;
     min-width: 0;
-    min-height: 50px;
-    height: 50px;
+    min-height: 42px;
+    height: 42px;
     padding: 3px;
     border-radius: 9px;
     display: flex;
@@ -4365,16 +4369,19 @@ body {
   .topbar .title-block { display: none; }
   .viewer-controls {
     width: 100%;
-    height: 44px;
+    height: 36px;
     margin: 0;
   }
   .viewer-controls .viewer-utility-action {
     width: 100%;
     min-width: 0;
-    height: 44px;
-    min-height: 44px;
-    padding: 5px 7px !important;
-    font-size: 10px;
+    height: 36px;
+    min-height: 36px;
+    padding: 5px 6px 5px 26px !important;
+    font-size: 9px;
+  }
+  .viewer-controls .viewer-utility-action::before {
+    left: 8px;
   }
 
   .legend-panel {
@@ -4401,26 +4408,34 @@ body {
     order: 0;
     flex: 1 1 auto;
     min-width: 0;
+    min-height: 0;
     width: 100%;
-    display: flex;
-    flex-direction: column;
-    flex-wrap: nowrap;
-    gap: 4px;
+    display: grid;
+    grid-template-rows: repeat(5, minmax(28px, 1fr));
+    gap: 3px;
     overflow: hidden;
     padding: 0;
   }
   .legend-status-control {
-    flex: 1 1 44px;
     width: 100%;
-    min-height: 44px;
-    max-height: 50px;
+    height: 100%;
+    min-height: 28px;
+    max-height: 36px;
   }
   .legend-status-control .legend-item {
     height: 100%;
-    min-height: 44px;
-    padding: 5px 6px;
-    gap: 5px;
-    font-size: 9px;
+    min-height: 28px;
+    padding: 3px 5px;
+    gap: 4px;
+    font-size: 8.5px;
+  }
+  .legend-info {
+    flex-basis: 26px;
+    width: 26px;
+    min-width: 26px;
+    height: 100%;
+    min-height: 28px;
+    font-size: 8px;
   }
   .legend-swatch,
   .legend-dot {
@@ -4439,10 +4454,10 @@ body {
   #btnCustomUnitFilter {
     width: 100%;
     min-width: 0;
-    height: 44px;
-    min-height: 44px;
-    padding: 5px 6px !important;
-    font-size: 9px;
+    height: 34px;
+    min-height: 34px;
+    padding: 4px 6px !important;
+    font-size: 8.5px;
   }
   .legend-filter-hint { display: none !important; }
 
