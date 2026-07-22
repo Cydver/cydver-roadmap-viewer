@@ -2184,7 +2184,10 @@ function applyZoom() {
   els.roadmap.style.transform = `scale(${zoomScale})`;
   els.roadmap.style.setProperty("--textBoost", legibleTextScale().toFixed(3));
   els.roadmap.style.setProperty("--barTextBoost", barLabelTextScale().toFixed(3));
-  const gridLinePx = clamp(1 / zoomScale, 1, 2.2);
+  // Keep structural dividers at a stable rendered thickness while zooming out.
+  // Builder bottoms out at 20% zoom (5x counter-scale); Viewer can zoom much
+  // farther on touch devices, so extend the same rule through its own minimum.
+  const gridLinePx = clamp(1 / zoomScale, 1, 1 / minimumZoom());
   els.roadmap.style.setProperty("--gridLine", `${gridLinePx.toFixed(2)}px`);
   els.roadmap.style.setProperty("--monthGridLine", `${(gridLinePx * 2).toFixed(2)}px`);
   els.chartStage.style.width = `${width * zoomScale}px`;
