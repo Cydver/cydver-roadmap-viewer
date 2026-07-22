@@ -115,6 +115,7 @@ let touchSelectionTapCandidate = null;
 let mobileCameraX = 0;
 let mobileCameraY = 0;
 let suppressTouchClickUntil = 0;
+let pendingDirectTouchClickSuppression = null;
 let lastInputModality = "pointer";
 let profileReturnFocusByKeyboard = false;
 let useWebKitNativeGestureInput = false;
@@ -126,6 +127,7 @@ let touchZoomSemanticGeneration = 0;
 let mobileZoomStyleFrame = 0;
 let mobileZoomStyleGeneration = 0;
 let mobileZoomStyleJob = null;
+let mobileViewportSemanticFrame = 0;
 let mobileTextBoostTargetsCache = [];
 let mobileMetaLabelEntriesCache = [];
 let mobileTierLabelEntriesCache = [];
@@ -348,8 +350,29 @@ function bindControls() {
     cancelInitialFitToWidth();
   }, { capture: true });
   document.addEventListener("pointerdown", event => {
+    // A new physical press is a new user intent. Any compatibility click still
+    // pending from a direct-touch profile action belongs to the previous press and
+    // must not suppress this new interaction.
+    pendingDirectTouchClickSuppression = null;
     lastInputModality = event.pointerType || "pointer";
     cancelInitialFitToWidth();
+  }, { capture: true });
+  document.addEventListener("click", event => {
+    const pending = pendingDirectTouchClickSuppression;
+    if (!pending) return;
+    if (performance.now() > pending.until) {
+      pendingDirectTouchClickSuppression = null;
+      return;
+    }
+    const dx = Number(event.clientX) - pending.x;
+    const dy = Number(event.clientY) - pending.y;
+    if (Math.hypot(dx, dy) > 18) return;
+    // Safari may synthesize the activation click after pointerup and may retarget
+    // it if the touched modal was removed. Swallow exactly that one same-contact
+    // click in capture phase before it can activate whatever is now underneath.
+    pendingDirectTouchClickSuppression = null;
+    event.preventDefault();
+    event.stopImmediatePropagation();
   }, { capture: true });
   document.getElementById("btnCloseDrawer").addEventListener("click", closeDrawer);
   document.getElementById("btnOpenPullCalculator")?.addEventListener("click", openPullCalculator);
@@ -465,19 +488,27 @@ function scheduleViewerViewportRefresh() {
   if (viewportResizeFrame) cancelAnimationFrame(viewportResizeFrame);
   viewportResizeFrame = requestAnimationFrame(() => {
     viewportResizeFrame = 0;
+    const previousZoom = zoomScale;
     zoomScale = clamp(zoomScale, minimumZoom(), MAX_ZOOM);
     applyZoomGeometry();
+
+    // Roadmap semantic presentation depends on roadmap zoom, not on Safari's
+    // independently changing visual viewport. Browser chrome can emit resize
+    // traffic while the page is otherwise idle; replaying every card/meta/grid
+    // semantic pass at an unchanged scale creates seconds of pointless rAF work.
+    // Only reconcile semantics when the resize actually forced the zoom value to
+    // change (for example if a future breakpoint changes the allowed minimum).
+    if (Math.abs(previousZoom - zoomScale) < 0.0001) {
+      if (isMobileTouchViewport()) scheduleMobileViewportSemanticCatchup();
+      return;
+    }
     if (isMobileTouchViewport()) {
-      // Safari browser chrome can resize the visual viewport independently of any
-      // roadmap interaction. Never turn that viewport event into a synchronous
-      // whole-roadmap inherited-style invalidation; reconcile mobile semantics via
-      // the same cancellable/chunked path used after touch gestures.
       touchZoomSemanticDirty = true;
       maybeScheduleDeferredTouchZoomPresentation();
     } else {
       applyZoomSemanticVariables();
-      touchZoomSemanticDirty = true;
-      maybeScheduleDeferredTouchZoomPresentation();
+      updateAdaptiveRoadmapPresentation();
+      touchZoomSemanticDirty = false;
     }
   });
 }
@@ -2260,7 +2291,9 @@ function bindProfileActionButton(button, action) {
 
   button.addEventListener("pointerdown", event => {
     if (event.pointerType !== "touch" || button.disabled) return;
+    event.preventDefault();
     touchPress = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, moved: false };
+    try { button.setPointerCapture(event.pointerId); } catch {}
   });
   button.addEventListener("pointermove", event => {
     if (!touchPress || event.pointerId !== touchPress.pointerId) return;
@@ -2273,11 +2306,17 @@ function bindProfileActionButton(button, action) {
     if (event.pointerType !== "touch" || touchPress?.pointerId !== event.pointerId) return;
     const shouldActivate = !touchPress.moved && !button.disabled;
     cancelTouchPress();
+    event.preventDefault();
     // pointerup is the direct end of the physical touch contact. Act here instead
-    // of waiting for WebKit's synthesized click recognition; the following click
-    // is swallowed locally so mouse/keyboard activation can keep using click.
-    suppressClickUntil = performance.now() + 700;
-    suppressTouchClickUntil = Math.max(suppressTouchClickUntil, performance.now() + 700);
+    // of waiting for WebKit's synthesized click recognition. Keep suppression
+    // local to the compatibility click from this exact contact; a blanket roadmap
+    // dead-period would make a legitimate next tap feel lost.
+    suppressClickUntil = performance.now() + 800;
+    pendingDirectTouchClickSuppression = {
+      x: Number(event.clientX) || 0,
+      y: Number(event.clientY) || 0,
+      until: performance.now() + 800
+    };
     event.stopPropagation();
     if (shouldActivate) action(event);
   });
@@ -2384,8 +2423,15 @@ function closeUnitProfile(immediate = false) {
     });
   };
 
-  if (immediate || isMobileTouchViewport() || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
+  if (immediate || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
     finish();
+    return;
+  }
+  if (isMobileTouchViewport()) {
+    // Keep the just-touched modal in the hit-test tree through the compatibility
+    // click turn. This is visually at most one frame, but prevents WebKit from
+    // retargeting that same tap to the top-right Pull Calc button underneath.
+    requestAnimationFrame(finish);
     return;
   }
 
@@ -2670,6 +2716,89 @@ function mobileTextBoostTargets() {
   return mobileTextBoostTargetsCache;
 }
 
+function mobileSemanticViewportRect(scale = zoomScale) {
+  const safeScale = Math.max(0.001, Number(scale) || 1);
+  // Avoid reading chart layout during post-gesture work. The window/visual
+  // viewport is a safe over-estimate of the chart viewport, so this can include
+  // a few extra targets without forcing a layout flush.
+  const viewportWidth = Math.max(1, Number(window.visualViewport?.width) || Number(window.innerWidth) || 1);
+  const viewportHeight = Math.max(1, Number(window.visualViewport?.height) || Number(window.innerHeight) || 1);
+  const scrollLeft = Math.max(0, Number(els.chartScroll?.scrollLeft) || 0);
+  const scrollTop = Math.max(0, Number(els.chartScroll?.scrollTop) || 0);
+  const marginScreenPx = 48;
+  return {
+    left: Math.max(0, (scrollLeft - marginScreenPx) / safeScale),
+    right: (scrollLeft + viewportWidth + marginScreenPx) / safeScale,
+    top: Math.max(0, (scrollTop - marginScreenPx) / safeScale),
+    bottom: (scrollTop + viewportHeight + marginScreenPx) / safeScale
+  };
+}
+function mobileSemanticRectIntersects(rect, viewport) {
+  return Boolean(rect && viewport
+    && rect.right >= viewport.left
+    && rect.left <= viewport.right
+    && rect.bottom >= viewport.top
+    && rect.top <= viewport.bottom);
+}
+function mobileSemanticElementRect(element) {
+  if (!element) return null;
+  const style = element.style;
+  const number = value => {
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  let left = number(style.left);
+  let top = number(style.top);
+  let width = number(style.width);
+  let height = number(style.height);
+
+  if (element.classList.contains("month-head")) {
+    top = 0;
+    height = MONTH_H;
+    if (!width && element.classList.contains("corner")) width = LEFT_W;
+  } else if (element.classList.contains("week-head")) {
+    top = MONTH_H;
+    height = WEEK_H;
+    if (!width) width = CELL_W;
+  } else if (element.classList.contains("tier-label")) {
+    left = 0;
+    width = LEFT_W;
+    if (!height) height = tierHeight(element.dataset.tierId);
+  } else if (element.classList.contains("lane-track")) {
+    left = LEFT_W + 10;
+    height = BAR_H;
+    if (!width) width = Math.max(4, baseChartWidth() - LEFT_W - 20);
+  } else if (element.classList.contains("meta-bar") || element.classList.contains("meta-link")) {
+    height = BAR_H;
+  } else if (element.classList.contains("meta-owner-node")) {
+    return { left: left - 16, right: left + 16, top: top - 16, bottom: top + 16 };
+  } else if (element.classList.contains("meta-owner-tether")) {
+    if (element.classList.contains("stem")) {
+      return { left: left - 12, right: left + 12, top, bottom: top + Math.max(1, height) };
+    }
+    return { left, right: left + Math.max(1, width), top: top - 12, bottom: top + 12 };
+  }
+
+  return {
+    left,
+    right: left + Math.max(1, width),
+    top,
+    bottom: top + Math.max(1, height)
+  };
+}
+function mobileSemanticElementVisible(element, viewport) {
+  return mobileSemanticRectIntersects(mobileSemanticElementRect(element), viewport);
+}
+function scheduleMobileViewportSemanticCatchup() {
+  if (!isMobileTouchViewport() || touchInteractionIsActive() || touchZoomSemanticPresentationBlocked()) return;
+  if (mobileViewportSemanticFrame) cancelAnimationFrame(mobileViewportSemanticFrame);
+  mobileViewportSemanticFrame = requestAnimationFrame(() => {
+    mobileViewportSemanticFrame = 0;
+    if (touchInteractionIsActive() || touchZoomSemanticPresentationBlocked() || touchZoomSemanticDirty) return;
+    scheduleMobileZoomStyleWork(zoomScale);
+  });
+}
+
 function processMobileZoomStyleFrame() {
   mobileZoomStyleFrame = 0;
   const job = mobileZoomStyleJob;
@@ -2680,19 +2809,20 @@ function processMobileZoomStyleFrame() {
     return;
   }
 
-  // Keep every post-gesture slice write-only and bounded. A new finger-down
-  // cancels the remaining work before the next slice runs.
+  // Every entry in this job is known to need an actual DOM change. Planning is
+  // read-only (inline style/class/text state only), so unchanged zoom states do not
+  // create a multi-second chain of empty animation frames.
   if (job.verticalIndex < job.verticalLines.length || job.horizontalIndex < job.horizontalLines.length) {
     let structuralRemaining = 12;
     while (structuralRemaining > 0 && job.verticalIndex < job.verticalLines.length) {
       const line = job.verticalLines[job.verticalIndex++];
       const width = line.classList.contains("month") ? job.monthGridLine : job.gridLine;
-      if (line?.isConnected && line.style.width !== width) line.style.width = width;
+      if (line?.isConnected) line.style.width = width;
       structuralRemaining -= 1;
     }
     while (structuralRemaining > 0 && job.horizontalIndex < job.horizontalLines.length) {
       const line = job.horizontalLines[job.horizontalIndex++];
-      if (line?.isConnected && line.style.height !== job.gridLine) line.style.height = job.gridLine;
+      if (line?.isConnected) line.style.height = job.gridLine;
       structuralRemaining -= 1;
     }
     if (job.verticalIndex < job.verticalLines.length || job.horizontalIndex < job.horizontalLines.length) {
@@ -2701,17 +2831,17 @@ function processMobileZoomStyleFrame() {
     }
   }
 
-  if (job.cardIndex < job.cardUnits.length) {
-    const cardLimit = Math.min(job.cardUnits.length, job.cardIndex + 6);
+  if (job.cardIndex < job.cardEntries.length) {
+    const cardLimit = Math.min(job.cardEntries.length, job.cardIndex + 6);
     while (job.cardIndex < cardLimit) {
-      const unit = job.cardUnits[job.cardIndex++];
-      const card = liveUnitCardForId(unit.id);
-      if (card?.isConnected && card.style.getPropertyValue("--textBoost") !== job.textBoost) {
-        card.style.setProperty("--textBoost", job.textBoost);
-      }
-      applyUnitCardDetailState(unit.id, mobileUnitCardDetailState(unit, job.scale));
+      const entry = job.cardEntries[job.cardIndex++];
+      const { card, detail, updateBoost } = entry;
+      if (!card?.isConnected) continue;
+      if (updateBoost) card.style.setProperty("--textBoost", job.textBoost);
+      card.classList.toggle("icon-only", Boolean(detail.iconOnly));
+      card.classList.toggle("tags-only", Boolean(detail.tagsOnly));
     }
-    if (job.cardIndex < job.cardUnits.length) {
+    if (job.cardIndex < job.cardEntries.length) {
       mobileZoomStyleFrame = requestAnimationFrame(processMobileZoomStyleFrame);
       return;
     }
@@ -2720,14 +2850,12 @@ function processMobileZoomStyleFrame() {
   if (job.metaIndex < job.metaEntries.length) {
     const metaLimit = Math.min(job.metaEntries.length, job.metaIndex + 6);
     while (job.metaIndex < metaLimit) {
-      const entry = job.metaEntries[job.metaIndex++];
-      const label = entry?.label;
-      if (label?.isConnected) {
-        if (label.style.getPropertyValue("--barTextBoost") !== job.barBoost) {
-          label.style.setProperty("--barTextBoost", job.barBoost);
-        }
-        applyMobileMetaLabelPresentation(entry, job.scale);
-      }
+      const work = job.metaEntries[job.metaIndex++];
+      const label = work.entry?.label;
+      if (!label?.isConnected) continue;
+      if (work.updateBoost) label.style.setProperty("--barTextBoost", job.barBoost);
+      if (work.updateText) label.textContent = work.presentation.desiredText;
+      if (work.updateHidden) label.hidden = work.presentation.shouldHide;
     }
     if (job.metaIndex < job.metaEntries.length) {
       mobileZoomStyleFrame = requestAnimationFrame(processMobileZoomStyleFrame);
@@ -2738,16 +2866,14 @@ function processMobileZoomStyleFrame() {
   let remaining = 12;
   while (remaining > 0 && job.textIndex < job.textTargets.length) {
     const element = job.textTargets[job.textIndex++];
-    if (element?.isConnected && element.style.getPropertyValue("--textBoost") !== job.textBoost) {
-      element.style.setProperty("--textBoost", job.textBoost);
-    }
+    if (element?.isConnected) element.style.setProperty("--textBoost", job.textBoost);
     remaining -= 1;
   }
 
   if (
     job.verticalIndex < job.verticalLines.length
     || job.horizontalIndex < job.horizontalLines.length
-    || job.cardIndex < job.cardUnits.length
+    || job.cardIndex < job.cardEntries.length
     || job.metaIndex < job.metaEntries.length
     || job.textIndex < job.textTargets.length
   ) {
@@ -2761,30 +2887,80 @@ function scheduleMobileZoomStyleWork(scale = zoomScale) {
   cancelMobileZoomStyleWork();
   const generation = mobileZoomStyleGeneration;
   const gridLinePx = clamp(1 / scale, 1, 1 / minimumZoom());
+  const gridLine = `${gridLinePx.toFixed(2)}px`;
+  const monthGridLine = `${(gridLinePx * 2).toFixed(2)}px`;
+  const textBoost = legibleTextScale(scale).toFixed(3);
+  const barBoost = barLabelTextScale(scale).toFixed(3);
+  const viewport = mobileSemanticViewportRect(scale);
+
+  const verticalLines = mobileGridVerticalCache.filter(line => {
+    if (!line?.isConnected) return false;
+    const x = Number.parseFloat(line.style.left) || 0;
+    if (x < viewport.left || x > viewport.right) return false;
+    const desired = line.classList.contains("month") ? monthGridLine : gridLine;
+    return line.style.width !== desired;
+  });
+  const horizontalLines = mobileGridHorizontalCache.filter(line => {
+    if (!line?.isConnected) return false;
+    const y = Number.parseFloat(line.style.top) || 0;
+    return y >= viewport.top && y <= viewport.bottom && line.style.height !== gridLine;
+  });
+
+  const cardEntries = [];
+  for (const unit of state.units || []) {
+    const card = liveUnitCardForId(unit.id);
+    if (!card?.isConnected || !mobileSemanticRectIntersects(iconRect(unit), viewport)) continue;
+    const detail = mobileUnitCardDetailState(unit, scale);
+    const updateBoost = card.style.getPropertyValue("--textBoost") !== textBoost;
+    const updateIconOnly = card.classList.contains("icon-only") !== Boolean(detail.iconOnly);
+    const updateTagsOnly = card.classList.contains("tags-only") !== Boolean(detail.tagsOnly);
+    if (updateBoost || updateIconOnly || updateTagsOnly) cardEntries.push({ card, detail, updateBoost });
+  }
+
+  const metaEntries = [];
+  for (const entry of mobileMetaLabelEntriesCache) {
+    const label = entry?.label;
+    if (!label?.isConnected || !mobileSemanticElementVisible(entry.bar, viewport)) continue;
+    const presentation = mobileMetaLabelPresentation(entry, scale);
+    if (!presentation) continue;
+    const updateBoost = label.style.getPropertyValue("--barTextBoost") !== barBoost;
+    const updateText = label.textContent !== presentation.desiredText;
+    const updateHidden = label.hidden !== presentation.shouldHide;
+    if (updateBoost || updateText || updateHidden) {
+      metaEntries.push({ entry, presentation, updateBoost, updateText, updateHidden });
+    }
+  }
+
+  const textTargets = mobileTextBoostTargets().filter(element =>
+    element?.isConnected
+    && mobileSemanticElementVisible(element, viewport)
+    && element.style.getPropertyValue("--textBoost") !== textBoost
+  );
+
   mobileZoomStyleJob = {
     generation,
     scale,
-    gridLine: `${gridLinePx.toFixed(2)}px`,
-    monthGridLine: `${(gridLinePx * 2).toFixed(2)}px`,
-    verticalLines: mobileGridVerticalCache,
+    gridLine,
+    monthGridLine,
+    verticalLines,
     verticalIndex: 0,
-    horizontalLines: mobileGridHorizontalCache,
+    horizontalLines,
     horizontalIndex: 0,
-    textBoost: legibleTextScale(scale).toFixed(3),
-    barBoost: barLabelTextScale(scale).toFixed(3),
-    cardUnits: state.units || [],
+    textBoost,
+    barBoost,
+    cardEntries,
     cardIndex: 0,
-    metaEntries: mobileMetaLabelEntriesCache,
+    metaEntries,
     metaIndex: 0,
-    textTargets: mobileTextBoostTargets(),
+    textTargets,
     textIndex: 0
   };
   if (
-    !mobileZoomStyleJob.verticalLines.length
-    && !mobileZoomStyleJob.horizontalLines.length
-    && !mobileZoomStyleJob.cardUnits.length
-    && !mobileZoomStyleJob.metaEntries.length
-    && !mobileZoomStyleJob.textTargets.length
+    !verticalLines.length
+    && !horizontalLines.length
+    && !cardEntries.length
+    && !metaEntries.length
+    && !textTargets.length
   ) {
     mobileZoomStyleJob = null;
     return;
@@ -2821,6 +2997,10 @@ function cancelDeferredTouchZoomPresentation() {
   if (touchZoomSemanticFrame) {
     cancelAnimationFrame(touchZoomSemanticFrame);
     touchZoomSemanticFrame = 0;
+  }
+  if (mobileViewportSemanticFrame) {
+    cancelAnimationFrame(mobileViewportSemanticFrame);
+    mobileViewportSemanticFrame = 0;
   }
 }
 
@@ -4714,12 +4894,13 @@ function endTouchGesture(event) {
     touchPoints.delete(event.pointerId);
     clearTouchStageTransform();
     els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
-    if (moved) {
-      suppressTouchClickUntil = performance.now() + 400;
-      markTouchZoomSemanticDirty();
-    } else {
-      maybeScheduleDeferredTouchZoomPresentation();
-    }
+    if (moved) suppressTouchClickUntil = performance.now() + 400;
+    // Panning never changes semantic zoom. It can, however, reveal offscreen
+    // elements that intentionally stayed stale while they were outside the
+    // viewport. Reconcile only the newly visible slice; if a pinch semantic pass
+    // is still dirty, let the normal settled-zoom path handle it instead.
+    if (touchZoomSemanticDirty) maybeScheduleDeferredTouchZoomPresentation();
+    else scheduleMobileViewportSemanticCatchup();
     return;
   }
 
@@ -4729,7 +4910,8 @@ function endTouchGesture(event) {
     pendingTouchPanFrame = null;
     clearTouchStageTransform();
     els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
-    maybeScheduleDeferredTouchZoomPresentation();
+    if (touchZoomSemanticDirty) maybeScheduleDeferredTouchZoomPresentation();
+    else scheduleMobileViewportSemanticCatchup();
   }
 }
 
