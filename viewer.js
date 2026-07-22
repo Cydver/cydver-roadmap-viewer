@@ -1197,79 +1197,50 @@ function pickupGoalProbability(pulls, copies, usePity) {
   return binomialAtLeast(pulls, randomCopiesNeeded);
 }
 
-function optimizePullAllocation(diamondPulls, msCopies, pilotCopies, options = {}) {
-  const paidPulls = Math.max(0, Math.floor(Number(diamondPulls) || 0));
+function bannerGoalProbabilityWithDiamonds(diamondPulls, tickets, copies, usePity) {
+  const sharedPulls = Math.max(0, Math.floor(Number(diamondPulls) || 0));
+  const bannerTickets = clampPullTickets(tickets);
+  return pickupGoalProbability(bannerTickets + sharedPulls, copies, usePity);
+}
+
+function adaptiveJointPullProbability(diamondPulls, msCopies, pilotCopies, options = {}) {
+  const sharedDiamondPulls = Math.max(0, Math.floor(Number(diamondPulls) || 0));
   const msGoal = clampPullTarget(msCopies);
   const pilotGoal = clampPullTarget(pilotCopies);
-  const enteredMsTickets = clampPullTickets(options.msTickets);
-  const enteredPilotTickets = clampPullTickets(options.pilotTickets);
-  const msTickets = msGoal ? enteredMsTickets : 0;
-  const pilotTickets = pilotGoal ? enteredPilotTickets : 0;
+  const msTickets = msGoal ? clampPullTickets(options.msTickets) : 0;
+  const pilotTickets = pilotGoal ? clampPullTickets(options.pilotTickets) : 0;
   const msUsePity = options.msUsePity !== false;
   const pilotUsePity = options.pilotUsePity !== false;
 
-  const makeResult = (msDiamondPulls, pilotDiamondPulls, probability, exact = true) => {
-    const msPulls = msDiamondPulls + msTickets;
-    const pilotPulls = pilotDiamondPulls + pilotTickets;
-    return {
-      msDiamondPulls,
-      pilotDiamondPulls,
-      msTickets,
-      pilotTickets,
-      msPulls,
-      pilotPulls,
-      msPityCopies: pityPickupCopies(msPulls, msUsePity),
-      pilotPityCopies: pityPickupCopies(pilotPulls, pilotUsePity),
-      probability,
-      exact
-    };
-  };
+  if (!msGoal && !pilotGoal) return 1;
+  if (!msGoal) return bannerGoalProbabilityWithDiamonds(sharedDiamondPulls, pilotTickets, pilotGoal, pilotUsePity);
+  if (!pilotGoal) return bannerGoalProbabilityWithDiamonds(sharedDiamondPulls, msTickets, msGoal, msUsePity);
 
-  if (!msGoal && !pilotGoal) return makeResult(0, 0, 1);
-  if (!msGoal) {
-    const pilotPulls = paidPulls + pilotTickets;
-    return makeResult(0, paidPulls, pickupGoalProbability(pilotPulls, pilotGoal, pilotUsePity));
-  }
-  if (!pilotGoal) {
-    const msPulls = paidPulls + msTickets;
-    return makeResult(paidPulls, 0, pickupGoalProbability(msPulls, msGoal, msUsePity));
-  }
-
-  let best = makeResult(0, paidPulls, -1);
-  const evaluate = (msDiamondPulls, exact = true) => {
-    const pilotDiamondPulls = paidPulls - msDiamondPulls;
-    const msPulls = msDiamondPulls + msTickets;
-    const pilotPulls = pilotDiamondPulls + pilotTickets;
-    const probability = pickupGoalProbability(msPulls, msGoal, msUsePity)
-      * pickupGoalProbability(pilotPulls, pilotGoal, pilotUsePity);
-    const candidate = makeResult(msDiamondPulls, pilotDiamondPulls, probability, exact);
-    if (probability > best.probability + 1e-15) {
-      best = candidate;
-    } else if (Math.abs(probability - best.probability) <= 1e-15) {
-      // Multiple allocations can be equally optimal (especially after pity makes
-      // a goal certain). Prefer the more balanced Diamond spend as a neutral tie-break.
-      const currentBalance = Math.abs(best.msDiamondPulls - best.pilotDiamondPulls);
-      const nextBalance = Math.abs(msDiamondPulls - pilotDiamondPulls);
-      if (nextBalance < currentBalance) best = candidate;
+  // Treat each banner as its own independent sequence of pickup pulls. Tickets are
+  // banner-specific pulls used before shared Diamonds. Once a banner reaches its
+  // requested target, a rational player stops spending Diamonds there and uses the
+  // remaining Diamonds on the unfinished banner. Because the featured rate is the
+  // same on both banners and pity depends only on that banner's pull count, the
+  // order/interleaving does not change the number of pulls each banner needs.
+  //
+  // Let A and B be the additional Diamond pulls required to finish MS and Pilot
+  // after their tickets. The exact adaptive success chance is P(A + B <= budget).
+  // Sum the MS completion-time PMF against the Pilot completion-time CDF.
+  let probability = 0;
+  let previousMsCdf = 0;
+  for (let msDiamondPulls = 0; msDiamondPulls <= sharedDiamondPulls; msDiamondPulls++) {
+    const msCdf = bannerGoalProbabilityWithDiamonds(msDiamondPulls, msTickets, msGoal, msUsePity);
+    const msCompletionProbability = Math.max(0, msCdf - previousMsCdf);
+    if (msCompletionProbability > 0) {
+      const pilotDiamondPulls = sharedDiamondPulls - msDiamondPulls;
+      const pilotCdf = bannerGoalProbabilityWithDiamonds(pilotDiamondPulls, pilotTickets, pilotGoal, pilotUsePity);
+      probability += msCompletionProbability * pilotCdf;
     }
-  };
-
-  // The problem is a discrete constrained optimization: tickets are fixed to their
-  // own banner and each paid pull can go to exactly one banner. Search every whole-
-  // pull Diamond split for normal balances. Extremely large inputs are sampled and
-  // then refined locally to prevent pathological values from freezing the UI.
-  if (paidPulls <= 25000) {
-    for (let msDiamondPulls = 0; msDiamondPulls <= paidPulls; msDiamondPulls++) evaluate(msDiamondPulls, true);
-  } else {
-    const stride = Math.max(1, Math.ceil(paidPulls / 5000));
-    for (let msDiamondPulls = 0; msDiamondPulls <= paidPulls; msDiamondPulls += stride) evaluate(msDiamondPulls, false);
-    evaluate(paidPulls, false);
-    const center = best.msDiamondPulls;
-    const from = Math.max(0, center - stride * 2);
-    const to = Math.min(paidPulls, center + stride * 2);
-    for (let msDiamondPulls = from; msDiamondPulls <= to; msDiamondPulls++) evaluate(msDiamondPulls, false);
+    previousMsCdf = msCdf;
+    if (msCdf >= 1) break;
   }
-  return best;
+
+  return Math.max(0, Math.min(1, probability));
 }
 
 function formatProbability(probability) {
@@ -1293,27 +1264,31 @@ function pullGoalLabel(msCopies, pilotCopies) {
   return pieces.length ? pieces.join(" + ") : "No target selected";
 }
 
-function pullAllocationStat(label, totalPulls, diamondPulls, tickets, pityCopies = 0) {
-  const parts = [];
-  if (diamondPulls) parts.push(`${(Number(diamondPulls) * PULL_COST_DIAMONDS).toLocaleString("en-US")} Diamonds`);
-  if (tickets) parts.push(`${Number(tickets).toLocaleString("en-US")} ticket${tickets === 1 ? "" : "s"}`);
-  if (!parts.length) parts.push("0 pulls");
-  if (pityCopies) parts.push(`+${pityCopies} pity`);
-  return `<div class="pull-calc-stat"><span>${escapeHtml(label)}</span><strong>${Number(totalPulls).toLocaleString("en-US")}</strong><small>${escapeHtml(parts.join(" · "))}</small></div>`;
+function pullResourceStat(label, pulls, detail) {
+  return `<div class="pull-calc-stat"><span>${escapeHtml(label)}</span><strong>${Number(pulls).toLocaleString("en-US")}</strong><small>${escapeHtml(detail)}</small></div>`;
 }
 
-function renderPullProbabilityBreakdown(kind, allocation) {
+function renderPullProbabilityBreakdown(kind, diamondPulls) {
   if (!els.pullCalcProbabilityList) return;
   const isPilotBreakdown = kind === "pilot";
-  const pulls = isPilotBreakdown ? allocation.pilotPulls : allocation.msPulls;
-  const tickets = isPilotBreakdown ? allocation.pilotTickets : allocation.msTickets;
-  const diamondPulls = isPilotBreakdown ? allocation.pilotDiamondPulls : allocation.msDiamondPulls;
-  const usePity = isPilotBreakdown ? pullCalculator.pilotUsePity : pullCalculator.msUsePity;
-  const pityCopies = pityPickupCopies(pulls, usePity);
   const target = isPilotBreakdown ? pullCalculator.pilotCopies : pullCalculator.msCopies;
+  const otherTarget = isPilotBreakdown ? pullCalculator.msCopies : pullCalculator.pilotCopies;
+  const otherLabel = isPilotBreakdown ? "MS" : "Pilot";
   const rows = [];
   for (let copies = 1; copies <= 6; copies++) {
-    const probability = pickupGoalProbability(pulls, copies, usePity);
+    const probability = isPilotBreakdown
+      ? adaptiveJointPullProbability(diamondPulls, pullCalculator.msCopies, copies, {
+          msTickets: pullCalculator.msTickets,
+          pilotTickets: pullCalculator.pilotTickets,
+          msUsePity: pullCalculator.msUsePity,
+          pilotUsePity: pullCalculator.pilotUsePity
+        })
+      : adaptiveJointPullProbability(diamondPulls, copies, pullCalculator.pilotCopies, {
+          msTickets: pullCalculator.msTickets,
+          pilotTickets: pullCalculator.pilotTickets,
+          msUsePity: pullCalculator.msUsePity,
+          pilotUsePity: pullCalculator.pilotUsePity
+        });
     const pct = Math.max(0, Math.min(100, probability * 100));
     const targetClass = copies === target ? " target" : "";
     rows.push(`
@@ -1323,9 +1298,10 @@ function renderPullProbabilityBreakdown(kind, allocation) {
         <strong class="pull-probability-value">${formatProbability(probability)}</strong>
       </div>`);
   }
-  const resourceBits = [`${pulls.toLocaleString("en-US")} pulls`, `${(diamondPulls * PULL_COST_DIAMONDS).toLocaleString("en-US")} Diamonds`, `${tickets.toLocaleString("en-US")} tickets`];
-  if (pityCopies) resourceBits.push(`+${pityCopies} pity ${pityCopies === 1 ? "copy" : "copies"}`);
-  els.pullCalcProbabilityList.innerHTML = `<div class="pull-probability-context"><span>${isPilotBreakdown ? "Pilot" : "MS"} · chance to pull at least each level${usePity ? " · pity enabled" : ""}</span><strong>${escapeHtml(resourceBits.join(" · "))}</strong></div>${rows.join("")}`;
+  const context = otherTarget
+    ? `${isPilotBreakdown ? "Pilot" : "MS"} · joint chance with ${otherLabel} ${pullTargetLabel(otherTarget)}`
+    : `${isPilotBreakdown ? "Pilot" : "MS"} · chance to pull at least each level`;
+  els.pullCalcProbabilityList.innerHTML = `<div class="pull-probability-context"><span>${escapeHtml(context)}</span><strong>Adaptive</strong></div>${rows.join("")}`;
 }
 
 function renderPullCalculator() {
@@ -1340,38 +1316,35 @@ function renderPullCalculator() {
 
   const diamondPulls = Math.floor((pullCalculator.diamonds || 0) / PULL_COST_DIAMONDS);
   const unusedDiamonds = (pullCalculator.diamonds || 0) - diamondPulls * PULL_COST_DIAMONDS;
-  const allocation = optimizePullAllocation(diamondPulls, pullCalculator.msCopies, pullCalculator.pilotCopies, {
-    msTickets: pullCalculator.msTickets,
-    pilotTickets: pullCalculator.pilotTickets,
-    msUsePity: pullCalculator.msUsePity,
-    pilotUsePity: pullCalculator.pilotUsePity
-  });
+  const msTickets = clampPullTickets(pullCalculator.msTickets);
+  const pilotTickets = clampPullTickets(pullCalculator.pilotTickets);
   const hasGoal = pullCalculator.msCopies > 0 || pullCalculator.pilotCopies > 0;
-  const goalProbability = hasGoal ? allocation.probability : 1;
-  const enteredTicketTotal = clampPullTickets(pullCalculator.msTickets) + clampPullTickets(pullCalculator.pilotTickets);
-  const totalResourcePulls = diamondPulls + enteredTicketTotal;
-  const pityParts = [];
-  if (pullCalculator.msCopies > 0 && allocation.msPityCopies) pityParts.push(`MS +${allocation.msPityCopies}`);
-  if (pullCalculator.pilotCopies > 0 && allocation.pilotPityCopies) pityParts.push(`Pilot +${allocation.pilotPityCopies}`);
+  const goalProbability = hasGoal
+    ? adaptiveJointPullProbability(diamondPulls, pullCalculator.msCopies, pullCalculator.pilotCopies, {
+        msTickets,
+        pilotTickets,
+        msUsePity: pullCalculator.msUsePity,
+        pilotUsePity: pullCalculator.pilotUsePity
+      })
+    : 1;
 
   els.pullCalcResult.innerHTML = `
     <div class="pull-calc-goal">
       <span>Chance to pull ${escapeHtml(pullGoalLabel(pullCalculator.msCopies, pullCalculator.pilotCopies))}</span>
       <strong>${hasGoal ? formatProbability(goalProbability) : "—"}</strong>
-      <small>${hasGoal ? "Optimal Diamond allocation; banner tickets stay on their own banner" : "Choose an MS or Pilot target above"}</small>
+      <small>${hasGoal ? "Adaptive strategy · Diamonds switch banners as targets are reached" : "Choose an MS or Pilot target above"}</small>
     </div>
     <div class="pull-calc-stats">
-      ${pullAllocationStat("Available pulls", totalResourcePulls, diamondPulls, enteredTicketTotal, 0)}
-      ${pullAllocationStat("MS pulls", allocation.msPulls, allocation.msDiamondPulls, allocation.msTickets, allocation.msPityCopies)}
-      ${pullAllocationStat("Pilot pulls", allocation.pilotPulls, allocation.pilotDiamondPulls, allocation.pilotTickets, allocation.pilotPityCopies)}
+      ${pullResourceStat("Diamond pulls", diamondPulls, `${(diamondPulls * PULL_COST_DIAMONDS).toLocaleString("en-US")} Diamonds`)}
+      ${pullResourceStat("MS tickets", msTickets, `${msTickets.toLocaleString("en-US")} MS ${msTickets === 1 ? "pull" : "pulls"}`)}
+      ${pullResourceStat("Pilot tickets", pilotTickets, `${pilotTickets.toLocaleString("en-US")} Pilot ${pilotTickets === 1 ? "pull" : "pulls"}`)}
     </div>
-    ${pityParts.length ? `<div class="pull-calc-pity-summary">Pity applied to pickup: ${escapeHtml(pityParts.join(" · "))}</div>` : ""}
     ${unusedDiamonds ? `<div class="pull-calc-unused">${unusedDiamonds.toLocaleString("en-US")} Dia remains below the 300-Diamond cost of one pull.</div>` : ""}`;
 
   const breakdown = pullCalculator.breakdown === "pilot" ? "pilot" : "ms";
   els.pullCalcMsBreakdown?.setAttribute("aria-pressed", String(breakdown === "ms"));
   els.pullCalcPilotBreakdown?.setAttribute("aria-pressed", String(breakdown === "pilot"));
-  renderPullProbabilityBreakdown(breakdown, allocation);
+  renderPullProbabilityBreakdown(breakdown, diamondPulls);
 }
 
 window.__ucePlaceholder = function(name) {
