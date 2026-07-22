@@ -4669,3 +4669,19 @@ body {
     background: rgba(5,10,17,.96);
   }
 }
+
+/* Mobile direct-manipulation latency: profile controls own a tap completely and
+   adaptive card metadata changes settle without opacity/visibility animations. */
+@media (pointer: coarse) {
+  .unit-profile-nav,
+  .unit-profile-close {
+    touch-action: none;
+  }
+  .unit-card .tags,
+  .unit-card .nameplate,
+  .unit-card.icon-only .tags,
+  .unit-card.icon-only .nameplate,
+  .unit-card.tags-only .nameplate {
+    transition: none;
+  }
+}
