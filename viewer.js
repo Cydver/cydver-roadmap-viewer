@@ -95,6 +95,7 @@ let unitProfileOverlay = null;
 let profileReturnFocus = null;
 let unitNoteReaderOverlay = null;
 let unitNoteReaderReturnFocus = null;
+let unitNoteReaderReturnFocusByKeyboard = false;
 let unitProfileOverflowObserver = null;
 let unitProfileLayoutObserver = null;
 let appTooltipEl = null;
@@ -121,6 +122,9 @@ let touchZoomSemanticGeneration = 0;
 let unitProfileBindingGeneration = 0;
 let unitProfileBindingFrame = 0;
 const unitProfileBindingTimers = new Set();
+let initialFitTimer = 0;
+let viewportResizeFrame = 0;
+let safeAreaProbeEl = null;
 const TOUCH_ZOOM_SEMANTIC_SETTLE_MS = 90;
 
 function createLayoutGeometryCache() {
@@ -315,14 +319,23 @@ async function init() {
   restoreViewerFilterState();
   startProfileImageWarmup();
   renderAll();
-  setTimeout(fitToWidth, 40);
+  initialFitTimer = setTimeout(() => {
+    initialFitTimer = 0;
+    fitToWidth();
+  }, 40);
   scheduleUnitTooltipWarmup();
   catalogPromise.then(backfillCatalogSourceUrls).catch(() => {});
 }
 
 function bindControls() {
-  document.addEventListener("keydown", () => { lastInputModality = "keyboard"; }, { capture: true });
-  document.addEventListener("pointerdown", event => { lastInputModality = event.pointerType || "pointer"; }, { capture: true });
+  document.addEventListener("keydown", () => {
+    lastInputModality = "keyboard";
+    cancelInitialFitToWidth();
+  }, { capture: true });
+  document.addEventListener("pointerdown", event => {
+    lastInputModality = event.pointerType || "pointer";
+    cancelInitialFitToWidth();
+  }, { capture: true });
   document.getElementById("btnCloseDrawer").addEventListener("click", closeDrawer);
   document.getElementById("btnOpenPullCalculator")?.addEventListener("click", openPullCalculator);
   document.getElementById("btnClosePullCalculator")?.addEventListener("click", closePullCalculator);
@@ -387,6 +400,7 @@ function bindControls() {
     if (event.target.closest?.(".unit-card, .meta-bar, .unit-drawer, .unit-tooltip-card, .viewer-controls, .topbar, .legend-panel, button, a, input, select, textarea")) return;
     hideTooltip(true);
   });
+  els.chartScroll.addEventListener("pointerdown", cancelInitialFitToWidth, { capture: true });
   els.roadmap.addEventListener("pointerdown", beginPan);
   els.roadmap.addEventListener("click", event => {
     if (!metaOwnerTouchSelectionId || customUnitFilterEditing || unitProfileOverlay) return;
@@ -423,14 +437,50 @@ function bindControls() {
   window.addEventListener("pointermove", moveTouchGesture, { passive: false });
   window.addEventListener("pointerup", endTouchGesture);
   window.addEventListener("pointercancel", endTouchGesture);
-  window.addEventListener("blur", recoverInterruptedPointerInteractions);
+  window.addEventListener("blur", () => recoverInterruptedPointerInteractions({ schedulePresentation: false }));
+  window.addEventListener("focus", maybeScheduleDeferredTouchZoomPresentation);
+  window.addEventListener("pagehide", () => recoverInterruptedPointerInteractions({ schedulePresentation: false }));
+  window.addEventListener("pageshow", maybeScheduleDeferredTouchZoomPresentation);
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) recoverInterruptedPointerInteractions();
+    if (document.hidden) recoverInterruptedPointerInteractions({ schedulePresentation: false });
+    else maybeScheduleDeferredTouchZoomPresentation();
   });
-  window.addEventListener("resize", () => {
+  window.addEventListener("resize", handleViewerViewportResize);
+  window.visualViewport?.addEventListener("resize", handleViewerVisualViewportResize);
+}
+
+function cancelInitialFitToWidth() {
+  if (!initialFitTimer) return;
+  clearTimeout(initialFitTimer);
+  initialFitTimer = 0;
+}
+
+function scheduleViewerViewportRefresh() {
+  if (viewportResizeFrame) cancelAnimationFrame(viewportResizeFrame);
+  viewportResizeFrame = requestAnimationFrame(() => {
+    viewportResizeFrame = 0;
     zoomScale = clamp(zoomScale, minimumZoom(), MAX_ZOOM);
-    applyZoom();
+    applyZoomGeometry();
+    applyZoomSemanticVariables();
+    touchZoomSemanticDirty = true;
+    maybeScheduleDeferredTouchZoomPresentation();
   });
+}
+function handleViewerViewportResize() {
+  cancelInitialFitToWidth();
+  if (touchInteractionIsActive() || panDrag) recoverInterruptedPointerInteractions();
+  hideTooltip(true);
+  hideAppTooltip(true);
+  scheduleViewerViewportRefresh();
+}
+function handleViewerVisualViewportResize() {
+  hideTooltip(true);
+  hideAppTooltip(true);
+  // Safari can change the visual viewport as browser chrome expands/collapses.
+  // That is not a reason to abort an otherwise healthy chart gesture; the layout
+  // viewport resize path above owns true orientation/layout interruption recovery.
+  if (touchInteractionIsActive() || panDrag) return;
+  scheduleViewerViewportRefresh();
 }
 
 async function loadRoadmap() {
@@ -769,7 +819,8 @@ function renderLegend() {
     bindAppTooltip(item, () => `<h3 class="app-tooltip-status-name" style="--tooltip-status-color:${escapeAttr(status.color)}">${escapeHtml(status.label)}</h3>${description ? `<div class="app-tooltip-description">${multilineHtml(description)}</div>` : ""}<div class="app-tooltip-filter-hint">Click to filter this status on or off.</div>`);
     item.addEventListener("click", event => {
       event.stopPropagation();
-      hideAppTooltip(true);
+      const keepPinnedTouchTooltip = isMobileTouchViewport() && lastInputModality === "touch";
+      if (!keepPinnedTouchTooltip) hideAppTooltip(true);
       toggleMetaStatusFilter(status.id);
     });
     item.addEventListener("keydown", event => {
@@ -1542,22 +1593,46 @@ function tooltipOwnerObstacleRects(anchorEl) {
     return { rect, weight };
   }).filter(item => item.rect.width > 0 && item.rect.height > 0);
 }
+function viewportSafeAreaInsets() {
+  if (!safeAreaProbeEl?.isConnected) {
+    safeAreaProbeEl = document.createElement("div");
+    safeAreaProbeEl.setAttribute("aria-hidden", "true");
+    safeAreaProbeEl.style.cssText = "position:fixed;inset:0 auto auto 0;width:0;height:0;visibility:hidden;pointer-events:none;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);";
+    document.body.appendChild(safeAreaProbeEl);
+  }
+  const style = getComputedStyle(safeAreaProbeEl);
+  return {
+    top: Number.parseFloat(style.paddingTop) || 0,
+    right: Number.parseFloat(style.paddingRight) || 0,
+    bottom: Number.parseFloat(style.paddingBottom) || 0,
+    left: Number.parseFloat(style.paddingLeft) || 0
+  };
+}
 function positionSmartTooltip(element, event, anchorEl = null, maxWidth = 360) {
   if (!element) return;
   const margin = 12;
   const gap = element.classList.contains("unit-tooltip-card") ? 30 : 18;
-  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
-  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-  element.style.maxWidth = `${Math.max(180, Math.min(maxWidth, viewportWidth - margin * 2))}px`;
+  const visualViewport = window.visualViewport;
+  const viewportLeft = Number(visualViewport?.offsetLeft) || 0;
+  const viewportTop = Number(visualViewport?.offsetTop) || 0;
+  const viewportWidth = Number(visualViewport?.width) || window.innerWidth || document.documentElement.clientWidth || 0;
+  const viewportHeight = Number(visualViewport?.height) || window.innerHeight || document.documentElement.clientHeight || 0;
+  const safe = viewportSafeAreaInsets();
+  const safeLeft = viewportLeft + safe.left + margin;
+  const safeTop = viewportTop + safe.top + margin;
+  const safeRight = viewportLeft + viewportWidth - safe.right - margin;
+  const safeBottom = viewportTop + viewportHeight - safe.bottom - margin;
+  const usableWidth = Math.max(180, safeRight - safeLeft);
+  element.style.maxWidth = `${Math.max(180, Math.min(maxWidth, usableWidth))}px`;
   const tooltipRect = element.getBoundingClientRect();
-  const clientX = Number.isFinite(event?.clientX) ? event.clientX : viewportWidth / 2;
-  const clientY = Number.isFinite(event?.clientY) ? event.clientY : viewportHeight / 2;
+  const clientX = Number.isFinite(event?.clientX) ? event.clientX : viewportLeft + viewportWidth / 2;
+  const clientY = Number.isFinite(event?.clientY) ? event.clientY : viewportTop + viewportHeight / 2;
   const reference = anchorEl instanceof Element && anchorEl.isConnected ? anchorEl : null;
   const anchorRect = reference?.getBoundingClientRect() || { left: clientX, right: clientX, top: clientY, bottom: clientY, width: 0, height: 0 };
   const order = tooltipPlacementOrder(reference, anchorRect);
   const ownerObstacles = tooltipOwnerObstacleRects(reference);
-  const maxLeft = Math.max(margin, viewportWidth - tooltipRect.width - margin);
-  const maxTop = Math.max(margin, viewportHeight - tooltipRect.height - margin);
+  const maxLeft = Math.max(safeLeft, safeRight - tooltipRect.width);
+  const maxTop = Math.max(safeTop, safeBottom - tooltipRect.height);
   const candidates = order.map((placement, preferenceIndex) => {
     let rawLeft = anchorRect.left + (anchorRect.width - tooltipRect.width) / 2;
     let rawTop = anchorRect.top + (anchorRect.height - tooltipRect.height) / 2;
@@ -1565,8 +1640,8 @@ function positionSmartTooltip(element, event, anchorEl = null, maxWidth = 360) {
     if (placement === "left") rawLeft = anchorRect.left - tooltipRect.width - gap;
     if (placement === "bottom") rawTop = anchorRect.bottom + gap;
     if (placement === "top") rawTop = anchorRect.top - tooltipRect.height - gap;
-    const left = clamp(rawLeft, margin, maxLeft);
-    const top = clamp(rawTop, margin, maxTop);
+    const left = clamp(rawLeft, safeLeft, maxLeft);
+    const top = clamp(rawTop, safeTop, maxTop);
     const candidateRect = { left, top, right: left + tooltipRect.width, bottom: top + tooltipRect.height };
     let score = preferenceIndex * 650 + (Math.abs(left - rawLeft) + Math.abs(top - rawTop)) * 18;
     const anchorOverlap = tooltipIntersectionArea(candidateRect, anchorRect);
@@ -1716,7 +1791,8 @@ function bindProfileMetaTooltips(root) {
     const metaLabel = label.dataset.metaLabel || label.textContent || "PVP Meta";
     const description = label.dataset.metaDescription || "";
     const htmlFactory = () => `<h3>${escapeHtml(metaLabel)}</h3><div class="app-tooltip-description">${multilineHtml(description)}</div>`;
-    bindAppTooltip(label, htmlFactory);
+    const tooltipTarget = isMobileTouchViewport() ? label.closest(".unit-profile-meta-row") || label : label;
+    bindAppTooltip(tooltipTarget, htmlFactory);
     label.addEventListener("focus", () => {
       const rect = label.getBoundingClientRect();
       showAppTooltip({ clientX: rect.left + rect.width / 2, clientY: rect.bottom }, htmlFactory, true, label);
@@ -1731,12 +1807,33 @@ function bindProfileMetaTooltips(root) {
   });
 }
 
+function modalFocusableElements(root) {
+  return [...(root?.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])]
+    .filter(element => element instanceof HTMLElement && element.offsetParent !== null);
+}
+function trapModalTabKey(root, event) {
+  if (event.key !== "Tab") return;
+  const focusable = modalFocusableElements(root);
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+  if (event.shiftKey && (active === first || !root.contains(active))) {
+    event.preventDefault();
+    last.focus({ preventScroll: true });
+  } else if (!event.shiftKey && (active === last || !root.contains(active))) {
+    event.preventDefault();
+    first.focus({ preventScroll: true });
+  }
+}
+
 function openUnitNoteReader(title, text, sourceButton = null) {
   const content = String(text || "").trim();
   if (!content) return;
   closeUnitNoteReader(true);
   hideAppTooltip(true);
   unitNoteReaderReturnFocus = sourceButton instanceof HTMLElement ? sourceButton : null;
+  unitNoteReaderReturnFocusByKeyboard = lastInputModality === "keyboard";
 
   const overlay = document.createElement("div");
   overlay.className = "unit-note-reader-overlay";
@@ -1750,15 +1847,12 @@ function openUnitNoteReader(title, text, sourceButton = null) {
     </article>`;
   overlay.addEventListener("click", event => { if (event.target === overlay) closeUnitNoteReader(); });
   overlay.querySelector(".unit-note-reader-close")?.addEventListener("click", () => closeUnitNoteReader());
-  overlay.addEventListener("keydown", event => {
-    if (event.key === "Tab") {
-      event.preventDefault();
-      overlay.querySelector(".unit-note-reader-close")?.focus({ preventScroll: true });
-    }
-  });
+  overlay.addEventListener("keydown", event => trapModalTabKey(overlay, event));
   document.body.appendChild(overlay);
   unitNoteReaderOverlay = overlay;
-  overlay.querySelector(".unit-note-reader-close")?.focus({ preventScroll: true });
+  if (!isMobileTouchViewport() || unitNoteReaderReturnFocusByKeyboard) {
+    overlay.querySelector(".unit-note-reader-close")?.focus({ preventScroll: true });
+  }
 }
 
 function closeUnitNoteReader(immediate = false) {
@@ -1766,14 +1860,16 @@ function closeUnitNoteReader(immediate = false) {
   const overlay = unitNoteReaderOverlay;
   if (overlay.classList.contains("closing") && !immediate) return;
   const returnFocus = unitNoteReaderReturnFocus;
+  const shouldRestoreFocus = !isMobileTouchViewport() || unitNoteReaderReturnFocusByKeyboard;
   unitNoteReaderOverlay = null;
   unitNoteReaderReturnFocus = null;
+  unitNoteReaderReturnFocusByKeyboard = false;
   let finished = false;
   const finish = () => {
     if (finished) return;
     finished = true;
     overlay.remove();
-    if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
+    if (shouldRestoreFocus && !unitNoteReaderOverlay && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
   };
   if (immediate || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
     finish();
@@ -2046,6 +2142,7 @@ function updateUnitProfileContent(overlay, unitId, activeSegmentId = null) {
   }
 
   const card = overlay.querySelector(".unit-profile-card");
+  overlay.setAttribute("aria-label", ms?.name || pilot?.name || "Unit profile");
   card?.setAttribute("aria-label", ms?.name || pilot?.name || "Unit profile");
   const grid = overlay.querySelector(".unit-profile-grid");
   if (!grid) return null;
@@ -2109,15 +2206,19 @@ function openUnitProfile(unitId, activeSegmentId = null) {
 
   const overlay = document.createElement("div");
   overlay.className = "unit-profile-overlay";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", "Unit profile");
   overlay.innerHTML = `
     <button class="unit-profile-nav unit-profile-nav-prev" type="button" aria-label="No previous MS" disabled><span aria-hidden="true">‹</span></button>
-    <article class="unit-profile-card" role="dialog" aria-modal="true" aria-label="Unit profile">
+    <article class="unit-profile-card" aria-label="Unit profile">
       <button class="unit-profile-close" type="button" aria-label="Close profile">×</button>
       <div class="unit-profile-grid unit-profile-grid-lshape"></div>
     </article>
     <button class="unit-profile-nav unit-profile-nav-next" type="button" aria-label="No next MS" disabled><span aria-hidden="true">›</span></button>`;
 
   overlay.addEventListener("click", event => { if (event.target === overlay) closeUnitProfile(); });
+  overlay.addEventListener("keydown", event => trapModalTabKey(overlay, event));
   overlay.querySelector(".unit-profile-close")?.addEventListener("click", () => closeUnitProfile());
   overlay.querySelector(".unit-profile-nav-prev")?.addEventListener("click", event => {
     event.stopPropagation();
@@ -2160,7 +2261,7 @@ function closeUnitProfile(immediate = false) {
     finished = true;
     overlay.remove();
     if (!document.querySelector(".unit-profile-overlay")) document.body.classList.remove("unit-profile-open");
-    if (shouldRestoreFocus && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
+    if (shouldRestoreFocus && !unitProfileOverlay && !unitNoteReaderOverlay && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
     else if (isMobileTouchViewport()) {
       setMetaOwnerHover(null);
       setMetaOwnerFocus(null);
@@ -2367,6 +2468,7 @@ function setZoomAtClientPoint(value, clientX, clientY) {
 }
 
 function handleWheelZoom(event) {
+  cancelInitialFitToWidth();
   if (!event.deltaY) return;
   event.preventDefault();
   event.stopPropagation();
@@ -3439,8 +3541,13 @@ function toggleMetaUnitFilter(unitId) {
 function effectiveMetaUnitFilters() {
   return customUnitFilterEditing ? customUnitFilterDraft : activeMetaUnitFilters;
 }
+function clearMetaFilterClickTimers() {
+  metaFilterClickTimers.forEach(timer => clearTimeout(timer));
+  metaFilterClickTimers.clear();
+}
 function enterCustomUnitFilterMode() {
   if (customUnitFilterEditing) return;
+  clearMetaFilterClickTimers();
   customUnitFilterDraft = new Set(activeMetaUnitFilters);
   customUnitFilterEditing = true;
   setMetaOwnerHover(null);
@@ -3750,6 +3857,7 @@ function cancelWebKitTouchActive() {
 
 function beginWebKitPinchGesture(event) {
   if (!useWebKitNativeGestureInput || !isMobileTouchViewport()) return;
+  cancelInitialFitToWidth();
   event.preventDefault();
   // A new native gesture is authoritative. Finalize any orphaned prior preview
   // before establishing the new baseline, then keep semantic fitting deferred.
@@ -3766,7 +3874,9 @@ function beginWebKitPinchGesture(event) {
   pendingTouchPanFrame = null;
   const scale = Math.max(0.001, Number(event.scale) || 1);
   webKitPinchGesture = { lastScale: scale };
-  beginPinchGestureAt(Number(event.clientX) || innerWidth / 2, Number(event.clientY) || innerHeight / 2, 1);
+  const clientX = Number(event.clientX);
+  const clientY = Number(event.clientY);
+  beginPinchGestureAt(Number.isFinite(clientX) ? clientX : innerWidth / 2, Number.isFinite(clientY) ? clientY : innerHeight / 2, 1);
 }
 function moveWebKitPinchGesture(event) {
   if (!useWebKitNativeGestureInput || !webKitPinchGesture || !pinchGesture) return;
@@ -3787,10 +3897,12 @@ function moveWebKitPinchGesture(event) {
   // mutation for presentation; avoiding an extra rAF hop removes a frame of input
   // latency on iOS, where web content may otherwise update less frequently than a
   // 120 Hz native UIKit gesture.
+  const clientX = Number(event.clientX);
+  const clientY = Number(event.clientY);
   applyPinchPreviewFrame({
     zoom: pinchGesture.previewZoom,
-    midpointX: Number(event.clientX) || innerWidth / 2,
-    midpointY: Number(event.clientY) || innerHeight / 2
+    midpointX: Number.isFinite(clientX) ? clientX : innerWidth / 2,
+    midpointY: Number.isFinite(clientY) ? clientY : innerHeight / 2
   });
 }
 function endWebKitPinchGesture(event) {
@@ -3801,6 +3913,7 @@ function endWebKitPinchGesture(event) {
 }
 function beginTouchGesture(event) {
   if (event.pointerType !== "touch") return;
+  cancelInitialFitToWidth();
   const point = { x: event.clientX, y: event.clientY };
   const backgroundTarget = event.target?.closest?.("#roadmap")
     && !event.target.closest?.(".unit-card, .meta-bar, .tier-label");
@@ -3978,7 +4091,7 @@ function handleLostPanPointerCapture(event) {
   if (!panDrag || event.pointerId !== panDrag.pointerId) return;
   endPan(event);
 }
-function recoverInterruptedPointerInteractions() {
+function recoverInterruptedPointerInteractions({ schedulePresentation = true } = {}) {
   touchSelectionTapCandidate = null;
 
   if (useWebKitNativeGestureInput) {
@@ -4007,7 +4120,8 @@ function recoverInterruptedPointerInteractions() {
     panDrag = null;
     els.chartScroll.classList.remove("panning");
   }
-  maybeScheduleDeferredTouchZoomPresentation();
+  if (schedulePresentation) maybeScheduleDeferredTouchZoomPresentation();
+  else cancelDeferredTouchZoomPresentation();
 }
 
 function beginPan(event) {

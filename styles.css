@@ -4032,3 +4032,78 @@ body {
     padding-left: max(5px, env(safe-area-inset-left));
   }
 }
+
+
+/* Full-system mobile audit: primary touch controls keep a stable Apple-sized
+   activation area without changing their restrained visual treatment. */
+@media (pointer: coarse) {
+  .viewer-controls .viewer-utility-action {
+    min-height: 44px;
+    height: 44px;
+  }
+  .legend-item[role="button"] {
+    min-height: 44px;
+  }
+  .legend-filter-controls button {
+    min-height: 44px;
+    height: 44px;
+  }
+  .pull-calc-tabs button,
+  .pull-calculator-drawer .diamond-clear,
+  .pull-calculator-drawer input:not([type="checkbox"]),
+  .pull-calculator-drawer select {
+    min-height: 44px;
+  }
+}
+
+@media (pointer: coarse) {
+  .legend-panel.custom-filter-editing .legend-filter-controls button {
+    min-height: 44px;
+    height: 44px;
+  }
+}
+@media (orientation: landscape) and (max-height: 600px) and (pointer: coarse) {
+  .legend-panel.custom-filter-editing .legend-wrap {
+    min-height: 46px;
+  }
+  .legend-panel.custom-filter-editing .legend-filter-controls button {
+    min-height: 44px;
+    height: 44px;
+  }
+}
+@media (pointer: coarse) {
+  .legend-panel.custom-filter-editing #btnSaveCustomUnitFilter,
+  .legend-panel.custom-filter-editing #btnClearCustomUnitFilter,
+  .legend-panel.custom-filter-editing #btnCancelCustomUnitFilter {
+    min-width: 44px;
+  }
+}
+
+/* Full-system audit: contextual profile help and checkbox labels are real touch
+   targets too. Keep their visual language, but give coarse pointers a stable
+   44px activation area instead of requiring precision tapping on small text. */
+@media (pointer: coarse) {
+  .pull-calc-pity-field {
+    min-height: 44px;
+    box-sizing: border-box;
+    align-items: center;
+    padding-top: 0;
+  }
+  .pull-calc-pity-field > span {
+    margin-top: 0;
+  }
+  .unit-profile-tag.has-description {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .unit-profile-source-link {
+    width: 44px;
+    height: 44px;
+    flex-basis: 44px;
+    transform: none;
+    touch-action: manipulation;
+  }
+  .unit-profile-source-link:hover {
+    transform: none;
+  }
+}
