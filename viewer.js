@@ -74,6 +74,7 @@ let pairedMsByPilotId = new Map();
 let pairedPilotByMsId = new Map();
 let profileTimelineCache = [];
 let profileTimelineIndexById = new Map();
+let metaOwnerElementIndex = new Map();
 const profileImageWarmCache = new Map();
 const mobileProfileGridCache = new Map();
 const MOBILE_PROFILE_GRID_CACHE_LIMIT = 7;
@@ -952,6 +953,7 @@ function renderChart() {
     .slice()
     .sort((a, b) => unitZIndex(a, sameSlotOffset(a)) - unitZIndex(b, sameSlotOffset(b)) || a.name.localeCompare(b.name))
     .forEach(renderUnit);
+  rebuildMetaOwnerElementIndex();
   roadmapImageReuseCache.clear();
   // Filtering is semantic state, not zoom presentation. Apply it when markup is
   // rebuilt instead of rescanning the whole roadmap at every zoom commit.
@@ -2393,7 +2395,7 @@ function closeUnitProfile(immediate = false) {
     });
   };
 
-  if (immediate || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
+  if (immediate || isMobileTouchViewport() || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
     finish();
     return;
   }
@@ -3038,19 +3040,38 @@ function setMetaOwnerFocus(unitId) {
 }
 function setMetaOwnerTouchSelection(unitId) {
   metaOwnerTouchSelectionId = unitId || null;
+  // While a touch profile is open, changing the background roadmap highlight on
+  // every Previous/Next press needlessly restyles the very large scene behind the
+  // modal. Keep the logical selection current and reconcile the roadmap once when
+  // the profile closes. Desktop keeps live background ownership updates.
+  if (isMobileTouchViewport() && unitProfileOverlay) return;
   updateMetaOwnerHighlight();
 }
 function setMetaOwnerProfile(unitId) {
   metaOwnerProfileId = unitId || null;
+  if (isMobileTouchViewport() && unitProfileOverlay) return;
   updateMetaOwnerHighlight();
 }
+function rebuildMetaOwnerElementIndex() {
+  metaOwnerElementIndex = new Map();
+  if (!els.roadmap) return;
+  const remember = (unitId, element) => {
+    if (!unitId || !element) return;
+    if (!metaOwnerElementIndex.has(unitId)) metaOwnerElementIndex.set(unitId, []);
+    metaOwnerElementIndex.get(unitId).push(element);
+  };
+  // Preserve the previous ownership semantics exactly: the roadmap card itself
+  // is keyed by its own unit id, while meta/tether/lane elements are keyed by
+  // their MS timeline owner id.
+  els.roadmap.querySelectorAll(".unit-card[data-id]").forEach(card => remember(card.dataset.id, card));
+  els.roadmap.querySelectorAll(".meta-bar[data-unit-id],.meta-link[data-unit-id],.meta-owner-tether[data-unit-id],.meta-owner-node[data-unit-id],.lane-track[data-unit-id]")
+    .forEach(element => remember(element.dataset.unitId, element));
+}
 function setMetaOwnerHighlightState(unitId, highlighted) {
-  if (!els.roadmap || !unitId) return;
-  const id = CSS.escape(unitId);
-  els.roadmap.querySelectorAll(
-    `.unit-card[data-id="${id}"],.meta-bar[data-unit-id="${id}"],.meta-link[data-unit-id="${id}"],` +
-    `.meta-owner-tether[data-unit-id="${id}"],.meta-owner-node[data-unit-id="${id}"],.lane-track[data-unit-id="${id}"]`
-  ).forEach(element => element.classList.toggle("meta-owner-highlight", highlighted));
+  if (!unitId) return;
+  for (const element of metaOwnerElementIndex.get(unitId) || []) {
+    element.classList.toggle("meta-owner-highlight", highlighted);
+  }
 }
 function updateMetaOwnerHighlight() {
   if (!els.roadmap) return;
@@ -3705,14 +3726,28 @@ function resetMobileCardMeasurementCache() {
   mobileCardMeasurementRoot = null;
   mobileCardDetailStateCache.clear();
 }
-function ensureMobileCardMeasurementRoot() {
-  if (mobileCardMeasurementRoot?.isConnected) return mobileCardMeasurementRoot;
-  if (!els.roadmap) return null;
+function mobileVisibleUnitsForCardPresentation(scale = zoomScale) {
+  if (!els.chartScroll) return state.units || [];
+  const safeScale = Math.max(0.001, Number(scale) || 1);
+  const buffer = ICON_W;
+  const left = els.chartScroll.scrollLeft / safeScale - buffer;
+  const right = (els.chartScroll.scrollLeft + els.chartScroll.clientWidth) / safeScale + buffer;
+  const top = els.chartScroll.scrollTop / safeScale - buffer;
+  const bottom = (els.chartScroll.scrollTop + els.chartScroll.clientHeight) / safeScale + buffer;
+  return (state.units || []).filter(unit => {
+    const rect = iconRect(unit);
+    return rect.right >= left && rect.left <= right && rect.bottom >= top && rect.top <= bottom;
+  });
+}
+function rebuildMobileCardMeasurementRoot(units) {
+  mobileCardMeasurementRoot?.remove();
+  mobileCardMeasurementRoot = null;
+  if (!els.roadmap || !units?.length) return null;
+  const wanted = new Set(units.map(unit => unit.id));
   const root = document.createElement("div");
   root.className = "mobile-card-measure-root";
-  const cardCount = els.roadmap.querySelectorAll(".unit-card").length;
-  const columns = Math.min(20, Math.max(1, cardCount));
-  const rows = Math.max(1, Math.ceil(cardCount / columns));
+  const columns = Math.min(8, Math.max(1, units.length));
+  const rows = Math.max(1, Math.ceil(units.length / columns));
   root.setAttribute("aria-hidden", "true");
   root.inert = true;
   Object.assign(root.style, {
@@ -3726,9 +3761,14 @@ function ensureMobileCardMeasurementRoot() {
     gap: "0",
     visibility: "hidden",
     pointerEvents: "none",
-    zIndex: "-1"
+    zIndex: "-1",
+    // This measurement surface is deliberately tiny and isolated from the live
+    // roadmap. Containment here prevents its fit checks from invalidating the
+    // application layout while preserving exact rendered card geometry.
+    contain: "layout style paint"
   });
   for (const source of els.roadmap.querySelectorAll(".unit-card")) {
+    if (!wanted.has(source.dataset.id)) continue;
     const card = source.cloneNode(true);
     card.querySelectorAll("img, .placeholder").forEach(node => node.remove());
     card.classList.remove("icon-only", "tags-only", "active", "meta-owner-highlight", "meta-filter-muted", "meta-filter-selected", "custom-filter-picked", "custom-filter-eligible", "custom-filter-active-selected");
@@ -3746,8 +3786,9 @@ function ensureMobileCardMeasurementRoot() {
   mobileCardMeasurementRoot = root;
   return root;
 }
-function mobileCardDetailStateKey(scale = zoomScale) {
-  return Number(scale).toFixed(4);
+function mobileCardDetailStateKey(scale = zoomScale, units = []) {
+  const ids = units.map(unit => unit.id).join(",");
+  return `${Number(scale).toFixed(4)}|${ids}`;
 }
 function rememberMobileCardDetailStates(key, states) {
   if (mobileCardDetailStateCache.has(key)) mobileCardDetailStateCache.delete(key);
@@ -3757,7 +3798,8 @@ function rememberMobileCardDetailStates(key, states) {
   }
 }
 function measureMobileUnitCardDetailStates(scale = zoomScale) {
-  const key = mobileCardDetailStateKey(scale);
+  const units = mobileVisibleUnitsForCardPresentation(scale);
+  const key = mobileCardDetailStateKey(scale, units);
   const cached = mobileCardDetailStateCache.get(key);
   if (cached) {
     mobileCardDetailStateCache.delete(key);
@@ -3765,17 +3807,16 @@ function measureMobileUnitCardDetailStates(scale = zoomScale) {
     return cached;
   }
   const visualSize = ICON_W * scale;
+  const states = new Map();
   if (visualSize < CARD_DETAILS_MIN_VISUAL_SIZE) {
-    const states = new Map();
-    for (const unit of state.units || []) states.set(unit.id, { iconOnly: true, tagsOnly: false });
+    for (const unit of units) states.set(unit.id, { iconOnly: true, tagsOnly: false });
     rememberMobileCardDetailStates(key, states);
     return states;
   }
-  const root = ensureMobileCardMeasurementRoot();
-  if (!root) return null;
+  const root = rebuildMobileCardMeasurementRoot(units);
+  if (!root) return states;
   const boost = legibleTextScale(scale);
   root.style.setProperty("--textBoost", boost.toFixed(3));
-  const states = new Map();
   for (const card of root.querySelectorAll(".unit-card")) {
     const unit = unitByIdIndex.get(card.dataset.id);
     const tags = card.querySelector(".tags");
@@ -3800,6 +3841,7 @@ function measureMobileUnitCardDetailStates(scale = zoomScale) {
   rememberMobileCardDetailStates(key, states);
   return states;
 }
+
 function applyUnitCardDetailStates(states) {
   if (!states || !els.roadmap) return;
   for (const card of els.roadmap.querySelectorAll(".unit-card")) {
@@ -4504,8 +4546,12 @@ function endTouchGesture(event) {
     touchPoints.delete(event.pointerId);
     clearTouchStageTransform();
     els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
-    if (moved) suppressTouchClickUntil = performance.now() + 400;
-    maybeScheduleDeferredTouchZoomPresentation();
+    if (moved) {
+      suppressTouchClickUntil = performance.now() + 400;
+      markTouchZoomSemanticDirty();
+    } else {
+      maybeScheduleDeferredTouchZoomPresentation();
+    }
     return;
   }
 

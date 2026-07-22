@@ -4653,3 +4653,19 @@ body {
     padding-right: 42px;
   }
 }
+
+/* Mobile profile controls are direct-manipulation controls. Avoid a backdrop-filter
+   layer/transition on the buttons themselves and let touch activation complete
+   without any synthetic double-tap gesture delay. */
+@media (pointer: coarse) {
+  .unit-profile-nav,
+  .unit-profile-close {
+    touch-action: manipulation;
+    transition: none;
+  }
+  .unit-profile-nav {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: rgba(5,10,17,.96);
+  }
+}
