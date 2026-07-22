@@ -84,6 +84,7 @@ let customUnitFilterDraft = new Set();
 const metaFilterClickTimers = new Map();
 let metaOwnerHoverId = null;
 let metaOwnerFocusId = null;
+let metaOwnerTouchSelectionId = null;
 let metaOwnerProfileId = null;
 let metaOwnerHighlightedId = null;
 let metaFocusDimmerEl = null;
@@ -107,6 +108,7 @@ let pinchGesture = null;
 let touchGestureFrame = 0;
 let pendingTouchPanFrame = null;
 let pendingTouchPinchFrame = null;
+let touchSelectionTapCandidate = null;
 let suppressTouchClickUntil = 0;
 let lastInputModality = "pointer";
 let profileReturnFocusByKeyboard = false;
@@ -378,6 +380,12 @@ function bindControls() {
     hideTooltip(true);
   });
   els.roadmap.addEventListener("pointerdown", beginPan);
+  els.roadmap.addEventListener("click", event => {
+    if (!metaOwnerTouchSelectionId || customUnitFilterEditing || unitProfileOverlay) return;
+    if (suppressRoadmapClick || performance.now() < suppressTouchClickUntil) return;
+    if (event.target.closest?.(".unit-card, .meta-bar")) return;
+    setMetaOwnerTouchSelection(null);
+  });
   els.chartScroll.addEventListener("wheel", handleWheelZoom, { passive: false });
 
   // WebKit exposes high-level GestureEvent scale data on iOS. When available,
@@ -713,6 +721,7 @@ function resolveIcon(unit) {
 function renderAll() {
   metaOwnerHoverId = null;
   metaOwnerFocusId = null;
+  metaOwnerTouchSelectionId = null;
   metaOwnerProfileId = null;
   metaOwnerHighlightedId = null;
   metaFocusDimmerEl = null;
@@ -921,6 +930,11 @@ function renderUnit(unit) {
       return;
     }
     bringUnitToFront(unit.id);
+    // Touch has no hover state: remember the opened MS as transient roadmap context
+    // so closing Full Profile returns to the same ownership highlight/dimmer view.
+    if (isMobileTouchViewport() && (event.pointerType === "touch" || lastInputModality === "touch")) {
+      setMetaOwnerTouchSelection(metaOwner?.id || null);
+    }
     openUnitProfile(unit.id);
   });
   card.addEventListener("pointerenter", event => {
@@ -1922,6 +1936,7 @@ function navigateUnitProfile(direction) {
   if (!targetId) return;
 
   const originalReturnFocus = profileReturnFocus;
+  if (isMobileTouchViewport() && lastInputModality === "touch") setMetaOwnerTouchSelection(targetId);
   openUnitProfile(targetId);
   profileReturnFocus = originalReturnFocus;
 
@@ -2578,6 +2593,10 @@ function setMetaOwnerFocus(unitId) {
   metaOwnerFocusId = unitId || null;
   updateMetaOwnerHighlight();
 }
+function setMetaOwnerTouchSelection(unitId) {
+  metaOwnerTouchSelectionId = unitId || null;
+  updateMetaOwnerHighlight();
+}
 function setMetaOwnerProfile(unitId) {
   metaOwnerProfileId = unitId || null;
   updateMetaOwnerHighlight();
@@ -2592,7 +2611,7 @@ function setMetaOwnerHighlightState(unitId, highlighted) {
 }
 function updateMetaOwnerHighlight() {
   if (!els.roadmap) return;
-  const activeId = metaOwnerProfileId || metaOwnerHoverId || metaOwnerFocusId || null;
+  const activeId = metaOwnerProfileId || metaOwnerHoverId || metaOwnerFocusId || metaOwnerTouchSelectionId || null;
   if (activeId === metaOwnerHighlightedId) return;
   if (metaOwnerHighlightedId) setMetaOwnerHighlightState(metaOwnerHighlightedId, false);
   if (activeId) setMetaOwnerHighlightState(activeId, true);
@@ -3266,6 +3285,7 @@ function enterCustomUnitFilterMode() {
   customUnitFilterEditing = true;
   setMetaOwnerHover(null);
   setMetaOwnerFocus(null);
+  setMetaOwnerTouchSelection(null);
   hideTooltip(true);
   hideAppTooltip(true);
   updateCustomUnitFilterControls();
@@ -3590,8 +3610,14 @@ function endWebKitPinchGesture(event) {
   suppressTouchClickUntil = performance.now() + 400;
 }
 function beginTouchGesture(event) {
-  if (useWebKitNativeGestureInput || event.pointerType !== "touch") return;
+  if (event.pointerType !== "touch") return;
   const point = { x: event.clientX, y: event.clientY };
+  const backgroundTarget = event.target?.closest?.("#roadmap")
+    && !event.target.closest?.(".unit-card, .meta-bar, .tier-label");
+  touchSelectionTapCandidate = event.isPrimary !== false && metaOwnerTouchSelectionId && backgroundTarget
+    ? { pointerId: event.pointerId, startX: point.x, startY: point.y }
+    : null;
+  if (useWebKitNativeGestureInput) return;
   touchPoints.set(event.pointerId, point);
 
   // Keep the entire mobile chart under app control (touch-action:none). A single
@@ -3620,7 +3646,12 @@ function beginTouchGesture(event) {
   event.preventDefault();
 }
 function moveTouchGesture(event) {
-  if (useWebKitNativeGestureInput || event.pointerType !== "touch" || !touchPoints.has(event.pointerId)) return;
+  if (event.pointerType !== "touch") return;
+  if (touchSelectionTapCandidate?.pointerId === event.pointerId
+      && Math.hypot(event.clientX - touchSelectionTapCandidate.startX, event.clientY - touchSelectionTapCandidate.startY) > 4) {
+    touchSelectionTapCandidate = null;
+  }
+  if (useWebKitNativeGestureInput || !touchPoints.has(event.pointerId)) return;
   const point = { x: event.clientX, y: event.clientY };
   touchPoints.set(event.pointerId, point);
 
@@ -3674,7 +3705,16 @@ function moveTouchGesture(event) {
   event.preventDefault();
 }
 function endTouchGesture(event) {
-  if (useWebKitNativeGestureInput || event.pointerType !== "touch" || !touchPoints.has(event.pointerId)) return;
+  if (event.pointerType !== "touch") return;
+  // A stationary background tap dismisses the transient touch selection, but
+  // movement hands off to the existing pan/pinch path without changing selection.
+  const clearTouchSelection = event.type === "pointerup"
+    && touchSelectionTapCandidate?.pointerId === event.pointerId;
+  if (touchSelectionTapCandidate?.pointerId === event.pointerId || event.type === "pointercancel") {
+    touchSelectionTapCandidate = null;
+  }
+  if (clearTouchSelection) setMetaOwnerTouchSelection(null);
+  if (useWebKitNativeGestureInput || !touchPoints.has(event.pointerId)) return;
 
   if (pinchGesture) {
     flushPendingTouchGestureFrame();
