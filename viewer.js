@@ -125,6 +125,7 @@ let touchZoomSemanticFrame = 0;
 let touchZoomSemanticDirty = false;
 let touchZoomSemanticGeneration = 0;
 let mobileZoomStyleFrame = 0;
+let mobileZoomStyleTimer = 0;
 let mobileZoomStyleGeneration = 0;
 let mobileZoomStyleJob = null;
 let mobileViewportSemanticFrame = 0;
@@ -139,7 +140,7 @@ const unitProfileBindingTimers = new Set();
 let initialFitTimer = 0;
 let viewportResizeFrame = 0;
 let safeAreaProbeEl = null;
-const TOUCH_ZOOM_SEMANTIC_SETTLE_MS = 280;
+const TOUCH_ZOOM_SEMANTIC_SETTLE_MS = 420;
 
 function createLayoutGeometryCache() {
   return {
@@ -356,6 +357,10 @@ function bindControls() {
     pendingDirectTouchClickSuppression = null;
     lastInputModality = event.pointerType || "pointer";
     cancelInitialFitToWidth();
+    // Any fresh finger-down outranks deferred semantic polish. Cancelling here,
+    // in capture phase, prevents a return-to-map worker from consuming more
+    // frames before a profile/control/chart handler gets a chance to run.
+    if (event.pointerType === "touch" && isMobileTouchViewport()) cancelDeferredTouchZoomPresentation();
   }, { capture: true });
   document.addEventListener("click", event => {
     const pending = pendingDirectTouchClickSuppression;
@@ -375,8 +380,8 @@ function bindControls() {
     event.stopImmediatePropagation();
   }, { capture: true });
   document.getElementById("btnCloseDrawer").addEventListener("click", closeDrawer);
-  document.getElementById("btnOpenPullCalculator")?.addEventListener("click", openPullCalculator);
-  document.getElementById("btnClosePullCalculator")?.addEventListener("click", closePullCalculator);
+  bindDirectTouchActionButton(document.getElementById("btnOpenPullCalculator"), openPullCalculator);
+  bindDirectTouchActionButton(document.getElementById("btnClosePullCalculator"), closePullCalculator);
   document.getElementById("btnResetPullCalculator")?.addEventListener("click", resetPullCalculator);
   els.customUnitFilterButton?.addEventListener("click", enterCustomUnitFilterMode);
   els.customUnitFilterSaveButton?.addEventListener("click", saveCustomUnitFilter);
@@ -2283,7 +2288,7 @@ function applyUnitProfileNavigationTarget(overlay, targetId, direction = 0) {
   return updated;
 }
 
-function bindProfileActionButton(button, action) {
+function bindDirectTouchActionButton(button, action) {
   if (!button || typeof action !== "function") return;
   let touchPress = null;
   let suppressClickUntil = 0;
@@ -2374,9 +2379,9 @@ function openUnitProfile(unitId, activeSegmentId = null) {
 
   overlay.addEventListener("click", event => { if (event.target === overlay) closeUnitProfile(); });
   overlay.addEventListener("keydown", event => trapModalTabKey(overlay, event));
-  bindProfileActionButton(overlay.querySelector(".unit-profile-close"), () => closeUnitProfile());
-  bindProfileActionButton(overlay.querySelector(".unit-profile-nav-prev"), () => navigateUnitProfile(-1));
-  bindProfileActionButton(overlay.querySelector(".unit-profile-nav-next"), () => navigateUnitProfile(1));
+  bindDirectTouchActionButton(overlay.querySelector(".unit-profile-close"), () => closeUnitProfile());
+  bindDirectTouchActionButton(overlay.querySelector(".unit-profile-nav-prev"), () => navigateUnitProfile(-1));
+  bindDirectTouchActionButton(overlay.querySelector(".unit-profile-nav-next"), () => navigateUnitProfile(1));
 
   document.body.appendChild(overlay);
   document.body.classList.add("unit-profile-open");
@@ -2604,7 +2609,10 @@ function isMobileTouchViewport() {
   return Boolean(window.matchMedia?.("(pointer: coarse)")?.matches);
 }
 function useMobileTransformCamera() {
-  return false;
+  // Keep mobile navigation in one compositor transform coordinate system. Baking
+  // every completed pinch back into roadmap scale + stage dimensions forces a
+  // large layout/raster handoff and is the remaining source of pinch-end stalls.
+  return isMobileTouchViewport();
 }
 function minimumZoom() {
   return isMobileTouchViewport() ? MOBILE_MIN_ZOOM : MIN_ZOOM;
@@ -2703,14 +2711,30 @@ function applyZoomStructuralVariables() {
   els.roadmap.style.setProperty("--monthGridLine", `${(gridLinePx * 2).toFixed(2)}px`);
 }
 function cancelMobileZoomStyleWork({ markDirty = false } = {}) {
-  const hadPending = Boolean(mobileZoomStyleJob || mobileZoomStyleFrame);
+  const hadPending = Boolean(mobileZoomStyleJob || mobileZoomStyleFrame || mobileZoomStyleTimer);
   mobileZoomStyleGeneration += 1;
+  if (mobileZoomStyleTimer) {
+    clearTimeout(mobileZoomStyleTimer);
+    mobileZoomStyleTimer = 0;
+  }
   if (mobileZoomStyleFrame) {
     cancelAnimationFrame(mobileZoomStyleFrame);
     mobileZoomStyleFrame = 0;
   }
   mobileZoomStyleJob = null;
   if (markDirty && hadPending) touchZoomSemanticDirty = true;
+}
+function scheduleMobileZoomStyleSlice() {
+  if (!mobileZoomStyleJob || mobileZoomStyleTimer || mobileZoomStyleFrame) return;
+  const generation = mobileZoomStyleGeneration;
+  // Do not occupy every animation frame with cosmetic/semantic catch-up. A small
+  // task gap gives WebKit a reliable opportunity to dispatch the next physical
+  // touch, which then cancels this work in capture phase.
+  mobileZoomStyleTimer = setTimeout(() => {
+    mobileZoomStyleTimer = 0;
+    if (!mobileZoomStyleJob || generation !== mobileZoomStyleGeneration) return;
+    mobileZoomStyleFrame = requestAnimationFrame(processMobileZoomStyleFrame);
+  }, 24);
 }
 function mobileTextBoostTargets() {
   return mobileTextBoostTargetsCache;
@@ -2723,9 +2747,19 @@ function mobileSemanticViewportRect(scale = zoomScale) {
   // a few extra targets without forcing a layout flush.
   const viewportWidth = Math.max(1, Number(window.visualViewport?.width) || Number(window.innerWidth) || 1);
   const viewportHeight = Math.max(1, Number(window.visualViewport?.height) || Number(window.innerHeight) || 1);
+  const marginScreenPx = 48;
+  if (useMobileTransformCamera()) {
+    // Camera transform: screen = camera + base * scale. Convert the visual
+    // viewport (plus prefetch margin) back into immutable roadmap coordinates.
+    return {
+      left: Math.max(0, (-mobileCameraX - marginScreenPx) / safeScale),
+      right: (-mobileCameraX + viewportWidth + marginScreenPx) / safeScale,
+      top: Math.max(0, (-mobileCameraY - marginScreenPx) / safeScale),
+      bottom: (-mobileCameraY + viewportHeight + marginScreenPx) / safeScale
+    };
+  }
   const scrollLeft = Math.max(0, Number(els.chartScroll?.scrollLeft) || 0);
   const scrollTop = Math.max(0, Number(els.chartScroll?.scrollTop) || 0);
-  const marginScreenPx = 48;
   return {
     left: Math.max(0, (scrollLeft - marginScreenPx) / safeScale),
     right: (scrollLeft + viewportWidth + marginScreenPx) / safeScale,
@@ -2826,7 +2860,7 @@ function processMobileZoomStyleFrame() {
       structuralRemaining -= 1;
     }
     if (job.verticalIndex < job.verticalLines.length || job.horizontalIndex < job.horizontalLines.length) {
-      mobileZoomStyleFrame = requestAnimationFrame(processMobileZoomStyleFrame);
+      scheduleMobileZoomStyleSlice();
       return;
     }
   }
@@ -2842,7 +2876,7 @@ function processMobileZoomStyleFrame() {
       card.classList.toggle("tags-only", Boolean(detail.tagsOnly));
     }
     if (job.cardIndex < job.cardEntries.length) {
-      mobileZoomStyleFrame = requestAnimationFrame(processMobileZoomStyleFrame);
+      scheduleMobileZoomStyleSlice();
       return;
     }
   }
@@ -2858,7 +2892,7 @@ function processMobileZoomStyleFrame() {
       if (work.updateHidden) label.hidden = work.presentation.shouldHide;
     }
     if (job.metaIndex < job.metaEntries.length) {
-      mobileZoomStyleFrame = requestAnimationFrame(processMobileZoomStyleFrame);
+      scheduleMobileZoomStyleSlice();
       return;
     }
   }
@@ -2877,7 +2911,7 @@ function processMobileZoomStyleFrame() {
     || job.metaIndex < job.metaEntries.length
     || job.textIndex < job.textTargets.length
   ) {
-    mobileZoomStyleFrame = requestAnimationFrame(processMobileZoomStyleFrame);
+    scheduleMobileZoomStyleSlice();
     return;
   }
   mobileZoomStyleJob = null;
@@ -2965,7 +2999,7 @@ function scheduleMobileZoomStyleWork(scale = zoomScale) {
     mobileZoomStyleJob = null;
     return;
   }
-  mobileZoomStyleFrame = requestAnimationFrame(processMobileZoomStyleFrame);
+  scheduleMobileZoomStyleSlice();
 }
 function applyZoomSemanticVariables() {
   if (isMobileTouchViewport()) {
