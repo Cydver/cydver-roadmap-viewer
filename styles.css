@@ -282,11 +282,10 @@ h1 {
   box-shadow: 0 14px 30px rgba(0,0,0,.35);
   cursor: pointer;
   z-index: 20;
-  transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease;
+  transition: border-color .15s ease, box-shadow .15s ease;
 }
 .unit-card:hover,
 .unit-card.active {
-  transform: translateY(-2px);
   border-color: rgba(255,255,255,.5);
   box-shadow: 0 20px 46px rgba(0,0,0,.45), 0 0 0 2px rgba(71,169,255,.26);
   z-index: 30;
@@ -412,11 +411,10 @@ h1 {
   overflow: visible;
   cursor: pointer;
   z-index: 8;
-  transition: transform .13s ease, filter .13s ease, box-shadow .13s ease;
+  transition: filter .13s ease, box-shadow .13s ease;
 }
 .meta-bar:hover,
 .meta-bar.active {
-  transform: translateY(-1px);
   filter: saturate(1.12) brightness(1.08);
   box-shadow: 0 12px 26px rgba(0,0,0,.34), 0 0 0 2px rgba(255,255,255,.18), inset 0 1px 0 rgba(255,255,255,.22);
   z-index: 9;

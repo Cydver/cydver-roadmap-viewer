@@ -239,20 +239,23 @@ function warmProfilePairImages(unit) {
     if (entry) decodeProfileWarmEntry(entry);
   }
 }
-const PULL_CALCULATOR_STORAGE_KEY = "ucePullCalculatorV1";
+const VIEWER_LOCAL_STATE_KEY = "uceViewerLocalStateV1";
+const LEGACY_PULL_CALCULATOR_STORAGE_KEY = "ucePullCalculatorV1";
 const PULL_COST_DIAMONDS = 300;
 const PITY_PULL_INTERVAL = 200;
 const PICKUP_RATE = 0.015;
-let pullCalculator = {
+const DEFAULT_PULL_CALCULATOR = Object.freeze({
   diamonds: 0,
   msCopies: 1,
   pilotCopies: 1,
-  msTickets: 0,
-  pilotTickets: 0,
+  msTickets: 10,
+  pilotTickets: 10,
   msUsePity: true,
   pilotUsePity: true,
   breakdown: "ms"
-};
+});
+let pullCalculator = { ...DEFAULT_PULL_CALCULATOR };
+let viewerLocalStateCache = { version: 1, filtersByRoadmap: {} };
 
 const els = {
   roadmap: document.getElementById("roadmap"),
@@ -290,7 +293,7 @@ document.addEventListener("DOMContentLoaded", init);
 
 async function init() {
   tooltipEl = els.tooltip;
-  loadPullCalculator();
+  loadViewerLocalState();
   bindControls();
 
   // Catalog data is useful for optional Altema backfill, but it is not required to
@@ -299,6 +302,7 @@ async function init() {
   const catalogPromise = loadOptionalCatalog();
   await loadRoadmap();
   normalizeState();
+  restoreViewerFilterState();
   startProfileImageWarmup();
   renderAll();
   setTimeout(fitToWidth, 40);
@@ -1113,25 +1117,110 @@ function clampPullTickets(value) {
   return Math.max(0, Math.min(1000000, Math.floor(Number(value) || 0)));
 }
 
-function loadPullCalculator() {
+function normalizeStoredPullCalculator(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  return {
+    diamonds: Math.max(0, Math.floor(Number(source.diamonds) || 0)),
+    msCopies: clampPullTarget(source.msCopies ?? DEFAULT_PULL_CALCULATOR.msCopies),
+    pilotCopies: clampPullTarget(source.pilotCopies ?? DEFAULT_PULL_CALCULATOR.pilotCopies),
+    msTickets: clampPullTickets(source.msTickets ?? DEFAULT_PULL_CALCULATOR.msTickets),
+    pilotTickets: clampPullTickets(source.pilotTickets ?? DEFAULT_PULL_CALCULATOR.pilotTickets),
+    msUsePity: source.msUsePity !== false,
+    pilotUsePity: source.pilotUsePity !== false,
+    breakdown: source.breakdown === "pilot" ? "pilot" : "ms"
+  };
+}
+
+function loadViewerLocalState() {
+  let stored = null;
   try {
-    const raw = JSON.parse(localStorage.getItem(PULL_CALCULATOR_STORAGE_KEY) || "null");
-    if (!raw || typeof raw !== "object") return;
-    pullCalculator = {
-      diamonds: Math.max(0, Math.floor(Number(raw.diamonds) || 0)),
-      msCopies: clampPullTarget(raw.msCopies ?? 1),
-      pilotCopies: clampPullTarget(raw.pilotCopies ?? 1),
-      msTickets: clampPullTickets(raw.msTickets ?? 0),
-      pilotTickets: clampPullTickets(raw.pilotTickets ?? 0),
-      msUsePity: raw.msUsePity !== false,
-      pilotUsePity: raw.pilotUsePity !== false,
-      breakdown: raw.breakdown === "pilot" ? "pilot" : "ms"
+    const raw = JSON.parse(localStorage.getItem(VIEWER_LOCAL_STATE_KEY) || "null");
+    if (raw && typeof raw === "object") stored = raw;
+  } catch {}
+
+  let pullSource = stored?.pullCalculator;
+  if (!pullSource) {
+    try {
+      const legacy = JSON.parse(localStorage.getItem(LEGACY_PULL_CALCULATOR_STORAGE_KEY) || "null");
+      if (legacy && typeof legacy === "object") pullSource = legacy;
+    } catch {}
+  }
+
+  pullCalculator = normalizeStoredPullCalculator(pullSource);
+  viewerLocalStateCache = {
+    version: 1,
+    filtersByRoadmap: stored?.filtersByRoadmap && typeof stored.filtersByRoadmap === "object"
+      ? { ...stored.filtersByRoadmap }
+      : {}
+  };
+}
+
+function viewerLocalStateHash(value) {
+  const text = String(value || "");
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function viewerRoadmapScopeKey() {
+  const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+  const privateId = params.get("private");
+  if (/^[A-Za-z0-9_-]{8,32}$/.test(String(privateId || ""))) return `private-${privateId}`;
+  const legacyRoadmap = params.get("roadmap");
+  if (legacyRoadmap) return `legacy-${viewerLocalStateHash(legacyRoadmap)}`;
+  return `published-${viewerLocalStateHash(location.pathname || "/")}`;
+}
+
+function restoreViewerFilterState() {
+  activeMetaStatusFilters.clear();
+  activeMetaUnitFilters.clear();
+  const saved = viewerLocalStateCache.filtersByRoadmap?.[viewerRoadmapScopeKey()];
+  if (!saved || typeof saved !== "object") return;
+
+  const validStatuses = new Set(getStatuses().map(status => status.id));
+  const validUnits = new Set((state.units || [])
+    .filter(unit => isMs(unit) && hasVisibleMetaSegments(unit))
+    .map(unit => unit.id));
+  for (const statusId of Array.isArray(saved.statusIds) ? saved.statusIds : []) {
+    if (validStatuses.has(statusId)) activeMetaStatusFilters.add(statusId);
+  }
+  for (const unitId of Array.isArray(saved.unitIds) ? saved.unitIds : []) {
+    if (validUnits.has(unitId)) activeMetaUnitFilters.add(unitId);
+  }
+}
+
+function saveViewerLocalState() {
+  try {
+    const filtersByRoadmap = { ...(viewerLocalStateCache.filtersByRoadmap || {}) };
+    const scope = viewerRoadmapScopeKey();
+    filtersByRoadmap[scope] = {
+      statusIds: [...activeMetaStatusFilters],
+      unitIds: [...activeMetaUnitFilters],
+      savedAt: Date.now()
     };
+
+    // Keep a small history so separate published/private seasons remember their own
+    // filters without letting stale roadmap entries grow localStorage forever.
+    const retainedFilters = Object.fromEntries(
+      Object.entries(filtersByRoadmap)
+        .sort((a, b) => Number(b[1]?.savedAt || 0) - Number(a[1]?.savedAt || 0))
+        .slice(0, 12)
+    );
+    const payload = {
+      version: 1,
+      pullCalculator: { ...pullCalculator },
+      filtersByRoadmap: retainedFilters
+    };
+    localStorage.setItem(VIEWER_LOCAL_STATE_KEY, JSON.stringify(payload));
+    viewerLocalStateCache = payload;
   } catch {}
 }
 
 function savePullCalculator() {
-  try { localStorage.setItem(PULL_CALCULATOR_STORAGE_KEY, JSON.stringify(pullCalculator)); } catch {}
+  saveViewerLocalState();
 }
 
 function openPullCalculator() {
@@ -1147,16 +1236,7 @@ function closePullCalculator() {
 }
 
 function resetPullCalculator() {
-  pullCalculator = {
-    diamonds: 0,
-    msCopies: 1,
-    pilotCopies: 1,
-    msTickets: 0,
-    pilotTickets: 0,
-    msUsePity: true,
-    pilotUsePity: true,
-    breakdown: "ms"
-  };
+  pullCalculator = { ...DEFAULT_PULL_CALCULATOR };
   savePullCalculator();
   renderPullCalculator();
 }
@@ -3167,11 +3247,13 @@ function updateMetaBarLabelVisibility() {
 function toggleMetaStatusFilter(statusId) {
   if (activeMetaStatusFilters.has(statusId)) activeMetaStatusFilters.delete(statusId);
   else activeMetaStatusFilters.add(statusId);
+  saveViewerLocalState();
   applyMetaFilters();
 }
 function toggleMetaUnitFilter(unitId) {
   if (activeMetaUnitFilters.has(unitId)) activeMetaUnitFilters.delete(unitId);
   else activeMetaUnitFilters.add(unitId);
+  saveViewerLocalState();
   applyMetaFilters();
   updateCustomUnitFilterControls();
 }
@@ -3197,6 +3279,7 @@ function saveCustomUnitFilter() {
   customUnitFilterEditing = false;
   customUnitFilterDraft = new Set();
   els.roadmap?.classList.remove("custom-unit-filter-editing");
+  saveViewerLocalState();
   applyMetaFilters();
   updateCustomUnitFilterControls();
 }
