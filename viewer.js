@@ -121,6 +121,11 @@ let profileReturnFocusByKeyboard = false;
 let useWebKitNativeGestureInput = false;
 let webKitPinchGesture = null;
 let webKitNativeTouchHadPinch = false;
+let webKitPinchBurstSettleTimer = 0;
+let webKitPinchBurstSettleFrame = 0;
+let webKitPinchBurstContinuation = false;
+let mobileStageGeometryScale = 1;
+let mobileStageShrinkPending = false;
 let touchZoomSemanticTimer = 0;
 let touchZoomSemanticFrame = 0;
 let touchZoomSemanticDirty = false;
@@ -2851,6 +2856,7 @@ function handleWheelZoom(event) {
 function applyZoomGeometry() {
   const width = baseChartWidth();
   const height = baseChartHeight();
+  mobileStageShrinkPending = false;
   if (useMobileTransformCamera()) {
     // Mobile owns navigation as a single transform camera. Do not bounce between
     // CSS transforms and hidden scroll offsets at gesture boundaries. Keeping the
@@ -2867,6 +2873,7 @@ function applyZoomGeometry() {
     els.chartStage.style.width = `${width * zoomScale}px`;
     els.chartStage.style.height = `${height * zoomScale}px`;
   }
+  mobileStageGeometryScale = zoomScale;
   if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
 }
 function applyZoomStructuralVariables() {
@@ -3206,6 +3213,7 @@ function cancelDeferredTouchZoomPresentation() {
 function touchInteractionIsActive() {
   return touchPoints.size > 0
     || Boolean(touchPanGesture || pinchGesture || webKitPinchGesture)
+    || Boolean(webKitPinchBurstSettleTimer || webKitPinchBurstSettleFrame)
     || Boolean(els.chartScroll?.classList.contains("touch-active"));
 }
 function touchZoomSemanticPresentationBlocked() {
@@ -3234,6 +3242,10 @@ function markTouchZoomSemanticDirty() {
 }
 function applyZoom() {
   cancelDeferredTouchZoomPresentation();
+  if (useWebKitNativeGestureInput) {
+    webKitPinchBurstContinuation = false;
+    cancelWebKitPinchBurstSettle({ releaseLayer: true });
+  }
   touchZoomSemanticDirty = false;
   applyZoomGeometry();
   applyZoomSemanticPresentation();
@@ -4798,6 +4810,94 @@ function commitTouchPanVisual() {
   els.chartScroll.scrollLeft = targetScrollLeft;
   els.chartScroll.scrollTop = targetScrollTop;
 }
+function cancelWebKitPinchBurstSettle({ releaseLayer = false } = {}) {
+  if (webKitPinchBurstSettleTimer) {
+    clearTimeout(webKitPinchBurstSettleTimer);
+    webKitPinchBurstSettleTimer = 0;
+  }
+  if (webKitPinchBurstSettleFrame) {
+    cancelAnimationFrame(webKitPinchBurstSettleFrame);
+    webKitPinchBurstSettleFrame = 0;
+  }
+  if (releaseLayer) els.chartScroll?.classList.remove("touch-gesturing");
+}
+function settleDeferredMobileStageGeometry() {
+  if (!mobileStageShrinkPending || useMobileTransformCamera()) return;
+  const width = baseChartWidth();
+  const height = baseChartHeight();
+  els.chartStage.style.width = `${width * zoomScale}px`;
+  els.chartStage.style.height = `${height * zoomScale}px`;
+  mobileStageGeometryScale = zoomScale;
+  mobileStageShrinkPending = false;
+  webKitPinchBurstContinuation = false;
+
+  // The stage may have deliberately kept a larger scroll extent throughout a
+  // rapid zoom-out burst. Clamp only once when that retained extent is released.
+  const maxScrollLeft = Math.max(0, width * zoomScale - els.chartScroll.clientWidth);
+  const maxScrollTop = Math.max(0, height * zoomScale - els.chartScroll.clientHeight);
+  if (els.chartScroll.scrollLeft > maxScrollLeft) els.chartScroll.scrollLeft = maxScrollLeft;
+  if (els.chartScroll.scrollTop > maxScrollTop) els.chartScroll.scrollTop = maxScrollTop;
+}
+function finishSettledWebKitPinchPresentation() {
+  webKitPinchBurstSettleFrame = 0;
+  if (touchInteractionIsActive()) {
+    scheduleWebKitPinchBurstSettle();
+    return;
+  }
+  els.chartScroll?.classList.remove("touch-gesturing");
+  if (!touchZoomSemanticDirty || touchZoomSemanticPresentationBlocked()) return;
+
+  // This is the same settled semantic work normally scheduled by the generic
+  // mobile timer, but native WebKit pinch already waited through the burst idle
+  // window. Do not add a second 420ms delay after the final finger lift.
+  applyZoomSemanticVariables();
+  updateAdaptiveTierLabels();
+  scheduleMobileZoomStyleWork();
+  touchZoomSemanticDirty = false;
+}
+function scheduleWebKitPinchBurstSettle() {
+  if (!useWebKitNativeGestureInput || !isMobileTouchViewport()) return;
+  cancelWebKitPinchBurstSettle();
+  webKitPinchBurstSettleTimer = setTimeout(() => {
+    webKitPinchBurstSettleTimer = 0;
+    if (touchInteractionIsActive()) {
+      scheduleWebKitPinchBurstSettle();
+      return;
+    }
+
+    // Zoom-out commits keep the previous (larger) scroll extent during a rapid
+    // lift/re-pinch burst. Shrink it once, after input has actually settled, so
+    // WebKit does not repeatedly rebuild the scroll tree/backing surface between
+    // contacts. The roadmap itself was already visually scaled at each gesture end.
+    settleDeferredMobileStageGeometry();
+    webKitPinchBurstSettleFrame = requestAnimationFrame(finishSettledWebKitPinchPresentation);
+  }, TOUCH_ZOOM_SEMANTIC_SETTLE_MS);
+}
+function commitWebKitNativePinchVisual(nextZoom, targetScrollLeft, targetScrollTop) {
+  const previousZoom = zoomScale;
+  clearTouchStageTransform();
+  zoomScale = nextZoom;
+
+  // A normal single pinch still commits exact scroll geometry immediately. Only
+  // the second and later pinches in a rapid lift/re-pinch burst reuse the already
+  // valid larger extent. That keeps the ordinary post-pinch scroll bounds exact,
+  // while removing repeated large-stage shrink/layout work from the failure case.
+  // If a continuation pinch grows beyond the retained extent, expand immediately
+  // so native scroll bounds can never be too small.
+  if (!webKitPinchBurstContinuation || zoomScale > mobileStageGeometryScale + 0.0001) {
+    applyZoomGeometry();
+  } else {
+    els.chartStage.style.transform = "";
+    els.roadmap.style.transform = `scale(${zoomScale})`;
+    if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
+    mobileStageShrinkPending = zoomScale < mobileStageGeometryScale - 0.0001;
+  }
+
+  els.chartScroll.scrollLeft = targetScrollLeft;
+  els.chartScroll.scrollTop = targetScrollTop;
+  if (Math.abs(previousZoom - zoomScale) > 0.0001) touchZoomSemanticDirty = true;
+}
+
 function commitTouchPinchVisual() {
   if (!pinchGesture) return;
   flushPendingTouchGestureFrame();
@@ -4813,6 +4913,10 @@ function commitTouchPinchVisual() {
   }
   const targetScrollLeft = Number.isFinite(pinchGesture.targetScrollLeft) ? pinchGesture.targetScrollLeft : pinchGesture.startScrollLeft;
   const targetScrollTop = Number.isFinite(pinchGesture.targetScrollTop) ? pinchGesture.targetScrollTop : pinchGesture.startScrollTop;
+  if (useWebKitNativeGestureInput) {
+    commitWebKitNativePinchVisual(nextZoom, targetScrollLeft, targetScrollTop);
+    return;
+  }
   clearTouchStageTransform();
   zoomScale = nextZoom;
   applyZoomGeometry();
@@ -4882,9 +4986,15 @@ function finishWebKitPinchGesture() {
   pinchGesture = null;
   pendingTouchPinchFrame = null;
   clearTouchStageTransform();
-  els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
-  if (hadActivePinch) suppressTouchClickUntil = performance.now() + 400;
-  maybeScheduleDeferredTouchZoomPresentation();
+  // Keep the already-created compositor layer warm across a rapid lift/re-pinch
+  // burst. Repeatedly demoting/promoting the giant chart stage is unnecessary
+  // layer/backing-store churn; release it once the same idle window used by mobile
+  // zoom semantics confirms the burst is over.
+  els.chartScroll.classList.remove("touch-pinching");
+  if (hadActivePinch) {
+    suppressTouchClickUntil = performance.now() + 400;
+    scheduleWebKitPinchBurstSettle();
+  }
 }
 function endWebKitTouchActive(event) {
   if (!useWebKitNativeGestureInput) return;
@@ -4898,10 +5008,11 @@ function endWebKitTouchActive(event) {
   if ((event.touches?.length || 0) === 0) {
     const hadPinch = webKitNativeTouchHadPinch;
     webKitNativeTouchHadPinch = false;
-    if (hadPinch || !("onscrollend" in els.chartScroll)) {
-      // Pinch does not necessarily emit scrollend, so its zoom-semantic follow-up
-      // still starts from touch release. Ordinary native pan on current Safari
-      // waits for scrollend instead, avoiding semantic work during momentum.
+    if (hadPinch) {
+      // Native pinch owns its own burst-settle lifecycle so repeated lift/re-pinch
+      // input cannot start layout/semantic catch-up between contacts.
+      scheduleWebKitPinchBurstSettle();
+    } else if (!("onscrollend" in els.chartScroll)) {
       maybeScheduleDeferredTouchZoomPresentation();
       if (!touchZoomSemanticDirty) scheduleMobileViewportSemanticCatchup();
     }
@@ -4910,14 +5021,21 @@ function endWebKitTouchActive(event) {
 function cancelWebKitTouchActive() {
   if (!useWebKitNativeGestureInput) return;
   webKitNativeTouchHadPinch = false;
+  webKitPinchBurstContinuation = false;
   els.chartScroll.classList.remove("touch-active");
   finishWebKitPinchGesture();
+  cancelWebKitPinchBurstSettle({ releaseLayer: true });
+  settleDeferredMobileStageGeometry();
   maybeScheduleDeferredTouchZoomPresentation();
 }
 
 function beginWebKitPinchGesture(event) {
   if (!useWebKitNativeGestureInput || !isMobileTouchViewport()) return;
   cancelInitialFitToWidth();
+  webKitPinchBurstContinuation = Boolean(
+    webKitPinchBurstSettleTimer || webKitPinchBurstSettleFrame || mobileStageShrinkPending
+  );
+  cancelWebKitPinchBurstSettle();
   event.preventDefault();
   // A new native gesture is authoritative. Finalize any orphaned prior preview
   // before establishing the new baseline, then keep semantic fitting deferred.
@@ -5152,7 +5270,10 @@ function recoverInterruptedPointerInteractions({ schedulePresentation = true } =
 
   if (useWebKitNativeGestureInput) {
     webKitNativeTouchHadPinch = false;
+    webKitPinchBurstContinuation = false;
     finishWebKitPinchGesture();
+    cancelWebKitPinchBurstSettle({ releaseLayer: true });
+    settleDeferredMobileStageGeometry();
     els.chartScroll.classList.remove("touch-active");
   } else {
     if (pinchGesture) commitTouchPinchVisual();
