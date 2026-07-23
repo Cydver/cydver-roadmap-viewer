@@ -4730,14 +4730,32 @@ body {
   }
 }
 
-/* --- Mobile baseline polish: edge-safe profile navigation + desktop-parity grid --- */
-.mobile-grid-structure-layer {
+/* --- Mobile baseline polish: edge-safe profile navigation + static vector grid --- */
+.grid-vector-layer {
   position: absolute;
   inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
   pointer-events: none;
 }
-.mobile-grid-structure-layer .grid-line.v.month {
-  width: calc(var(--gridLine) + var(--gridLine));
+.grid-vector-line {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+  shape-rendering: crispEdges;
+  stroke-linecap: butt;
+  pointer-events: none;
+}
+/* A 1px SVG stroke reads lighter than the filled desktop div on Retina/WebKit.
+   Slightly stronger fixed strokes preserve the same visual hierarchy without any
+   per-pinch style work: minor ~= desktop 1px, month ~= desktop 2px. */
+.grid-vector-line.minor {
+  stroke: rgba(255,255,255,.18);
+  stroke-width: 1.3;
+}
+.grid-vector-line.month {
+  stroke: rgba(255,255,255,.31);
+  stroke-width: 2.4;
 }
 
 @media (pointer: coarse) {
@@ -4808,5 +4826,21 @@ body {
   }
   .unit-profile-nav-next {
     right: max(8px, calc(env(safe-area-inset-right) + 5px));
+  }
+}
+
+/* Mobile profile hierarchy: keep the identity/hero panel at the normal content width.
+   Only the body sections that can scroll through the fixed mid-viewport arrows use
+   the existing navigation-safe rail. This preserves information density and alignment
+   instead of squeezing the entire profile for a floating control. */
+@media (orientation: portrait) and (max-width: 600px) and (pointer: coarse),
+       (orientation: landscape) and (max-height: 600px) and (pointer: coarse) {
+  .unit-profile-grid-lshape > .unit-profile-ms-panel {
+    padding-left: 20px;
+    padding-right: 20px;
+  }
+  .unit-profile-grid-lshape > .unit-profile-ms-panel > .unit-profile-section {
+    margin-left: 24px;
+    margin-right: 24px;
   }
 }
