@@ -2376,7 +2376,7 @@ function bindDirectTouchRoadmapActivation(element, action) {
   });
 }
 
-function bindDirectTouchActionButton(button, action, { requireReleaseInside = false } = {}) {
+function bindDirectTouchActionButton(button, action) {
   if (!button || typeof action !== "function") return;
   let touchPress = null;
   let suppressClickUntil = 0;
@@ -2409,17 +2409,74 @@ function bindDirectTouchActionButton(button, action, { requireReleaseInside = fa
   });
   button.addEventListener("pointerup", event => {
     if (event.pointerType !== "touch" || touchPress?.pointerId !== event.pointerId) return;
-    const rect = requireReleaseInside ? button.getBoundingClientRect() : null;
-    const releasedInside = !rect
-      || (event.clientX >= rect.left && event.clientX <= rect.right
-        && event.clientY >= rect.top && event.clientY <= rect.bottom);
-    const shouldActivate = !touchPress.moved && releasedInside && !button.disabled;
+    const shouldActivate = !touchPress.moved && !button.disabled;
     clearTouchPress(event.pointerId);
     event.preventDefault();
     // pointerup is the direct end of the physical touch contact. Act here instead
     // of waiting for WebKit's synthesized click recognition. Keep suppression
     // local to the compatibility click from this exact contact; a blanket roadmap
     // dead-period would make a legitimate next tap feel lost.
+    suppressClickUntil = performance.now() + 800;
+    armDirectTouchClickSuppression(event);
+    event.stopPropagation();
+    if (shouldActivate) action(event);
+  });
+  button.addEventListener("click", event => {
+    if (performance.now() < suppressClickUntil) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    event.stopPropagation();
+    action(event);
+  });
+}
+
+function bindDirectTouchReleaseDismissButton(button, action) {
+  if (!button || typeof action !== "function") return;
+  let touchPress = null;
+  let suppressClickUntil = 0;
+  const clearTouchPress = pointerId => {
+    if (pointerId != null && touchPress?.pointerId !== pointerId) return;
+    touchPress = null;
+    button.classList.remove("touch-pressed");
+  };
+
+  button.addEventListener("pointerdown", event => {
+    if (event.pointerType !== "touch" || event.isPrimary === false || button.disabled) return;
+    event.preventDefault();
+    clearTouchPress();
+    touchPress = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, moved: false };
+    button.classList.add("touch-pressed");
+
+    // Direct-manipulation touch pointers may be implicitly captured to the pressed
+    // element before pointerdown is dispatched. The profile X removes itself when
+    // activated, so opt out of capture here: a release outside is then naturally
+    // hit-tested away from the button, and a valid pointerup can remove the modal
+    // without leaving WebKit to reconcile a detached capture target afterward.
+    try { button.releasePointerCapture?.(event.pointerId); } catch {}
+  });
+  button.addEventListener("pointermove", event => {
+    if (!touchPress || event.pointerId !== touchPress.pointerId) return;
+    if (Math.hypot(event.clientX - touchPress.x, event.clientY - touchPress.y) > 10) {
+      touchPress.moved = true;
+      button.classList.remove("touch-pressed");
+    }
+  });
+  button.addEventListener("pointerleave", event => {
+    if (event.pointerType === "touch" && touchPress?.pointerId === event.pointerId) clearTouchPress(event.pointerId);
+  });
+  button.addEventListener("pointercancel", event => {
+    clearTouchPress(event.pointerId);
+  });
+  button.addEventListener("lostpointercapture", event => {
+    clearTouchPress(event.pointerId);
+  });
+  button.addEventListener("pointerup", event => {
+    if (event.pointerType !== "touch" || touchPress?.pointerId !== event.pointerId) return;
+    const shouldActivate = !touchPress.moved && !button.disabled;
+    clearTouchPress(event.pointerId);
+    event.preventDefault();
     suppressClickUntil = performance.now() + 800;
     armDirectTouchClickSuppression(event);
     event.stopPropagation();
@@ -2480,7 +2537,7 @@ function openUnitProfile(unitId, activeSegmentId = null) {
 
   overlay.addEventListener("click", event => { if (event.target === overlay) closeUnitProfile(); });
   overlay.addEventListener("keydown", event => trapModalTabKey(overlay, event));
-  bindDirectTouchActionButton(overlay.querySelector(".unit-profile-close"), () => closeUnitProfile(), { requireReleaseInside: true });
+  bindDirectTouchReleaseDismissButton(overlay.querySelector(".unit-profile-close"), () => closeUnitProfile());
   bindDirectTouchActionButton(overlay.querySelector(".unit-profile-nav-prev"), () => navigateUnitProfile(-1));
   bindDirectTouchActionButton(overlay.querySelector(".unit-profile-nav-next"), () => navigateUnitProfile(1));
 
