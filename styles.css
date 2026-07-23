@@ -3439,6 +3439,14 @@ body {
     animation-duration: .14s;
   }
 
+  /* Touch ownership uses a roadmap-sized dimmer. Do not animate that surface on
+     iOS: opacity transitions can promote a very large backing layer even though
+     the visual change is only a brief focus cue. The selected owner still changes
+     immediately and Full Profile keeps its own independent viewport veil. */
+  .meta-focus-dimmer {
+    transition: none;
+  }
+
   /* Keep the close target spatially stable while a finger is trying to hit it.
      The full-card rise/scale animation moves this control during the first 220ms;
      on coarse pointers the overlay fade provides the entrance/exit motion instead. */

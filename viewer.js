@@ -1080,12 +1080,14 @@ function renderUnit(unit) {
       return;
     }
     bringUnitToFront(unit.id);
-    // Touch has no hover state: remember the opened MS as transient roadmap context
-    // so closing Full Profile returns to the same ownership highlight/dimmer view.
-    if (isMobileTouchViewport() && (event.pointerType === "touch" || lastInputModality === "touch")) {
-      setMetaOwnerTouchSelection(metaOwner?.id || null);
-    }
+    const rememberTouchOwner = isMobileTouchViewport() && (event.pointerType === "touch" || lastInputModality === "touch");
+    const touchOwnerId = rememberTouchOwner ? (metaOwner?.id || null) : null;
+    // Open the modal before recording touch ownership. setMetaOwnerTouchSelection()
+    // deliberately avoids repainting the large roadmap while a mobile profile is
+    // present, so this ordering preserves return-to-map context without creating
+    // the full-roadmap dimmer immediately underneath the profile.
     openUnitProfile(unit.id);
+    if (rememberTouchOwner) setMetaOwnerTouchSelection(touchOwnerId);
   });
   card.addEventListener("pointerenter", event => {
     if (event.pointerType === "touch") return;
@@ -1157,10 +1159,11 @@ function renderSegment(unit, segment, index = 0, total = 1) {
       toggleCustomUnitFilterDraft(unit);
       return;
     }
-    if (isMobileTouchViewport() && (event.pointerType === "touch" || lastInputModality === "touch")) {
-      setMetaOwnerTouchSelection(unit.id);
-    }
+    const rememberTouchOwner = isMobileTouchViewport() && (event.pointerType === "touch" || lastInputModality === "touch");
+    // As with roadmap cards, defer the visual ownership reconciliation until the
+    // profile closes. The logical selection is still updated while the modal is up.
     openUnitProfile(unit.id, segment.id);
+    if (rememberTouchOwner) setMetaOwnerTouchSelection(unit.id);
   });
   bar.addEventListener("pointerenter", event => {
     if (event.pointerType === "touch" || customUnitFilterEditing) return;
@@ -2360,6 +2363,7 @@ function openUnitProfile(unitId, activeSegmentId = null) {
   closeDrawer();
   closePullCalculator();
   closeUnitProfile(true);
+  if (isMobileTouchViewport()) suspendMetaOwnerHighlightForTouchProfile();
 
   profileReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   profileReturnFocusByKeyboard = lastInputModality === "keyboard";
@@ -3393,6 +3397,19 @@ function setMetaOwnerProfile(unitId) {
   metaOwnerProfileId = unitId || null;
   if (isMobileTouchViewport() && unitProfileOverlay) return;
   updateMetaOwnerHighlight();
+}
+function suspendMetaOwnerHighlightForTouchProfile() {
+  if (!isMobileTouchViewport() || !els.roadmap) return;
+  // Full Profile already supplies its own viewport veil. Keeping the roadmap's
+  // ownership dimmer active underneath it leaves a second, roadmap-sized opacity
+  // surface alive for no visible benefit and makes profile open/nav/close compete
+  // with that large layer on iOS. Preserve all logical owner ids, but temporarily
+  // remove only the rendered ownership focus. closeUnitProfile() reconciles the
+  // current logical touch selection once the modal is gone.
+  if (metaOwnerHighlightedId) setMetaOwnerHighlightState(metaOwnerHighlightedId, false);
+  metaFocusDimmerEl?.classList.remove("active");
+  els.roadmap.classList.remove("meta-owner-context-active");
+  metaOwnerHighlightedId = null;
 }
 function rebuildMobileStaticPresentationIndex() {
   if (!els.roadmap || !isMobileTouchViewport()) {
