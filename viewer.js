@@ -2333,7 +2333,13 @@ function bindDirectTouchRoadmapActivation(element, action) {
   element.addEventListener("pointerdown", event => {
     if (event.pointerType !== "touch" || event.isPrimary === false) return;
     touchPress = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, moved: false };
-    try { element.setPointerCapture(event.pointerId); } catch {}
+    // On the restored WebKit-native roadmap path, leave the pointer completely
+    // uncaptured so Safari can own one-finger scrolling and GestureEvent pinch
+    // recognition even when the contact begins on a dense card/meta target.
+    // Stationary taps still receive pointerup directly on the same element.
+    if (!useWebKitNativeGestureInput) {
+      try { element.setPointerCapture(event.pointerId); } catch {}
+    }
   });
   element.addEventListener("pointermove", event => {
     if (!touchPress || event.pointerId !== touchPress.pointerId) return;
@@ -2394,25 +2400,37 @@ function bindDirectTouchActionButton(button, action) {
   if (!button || typeof action !== "function") return;
   let touchPress = null;
   let suppressClickUntil = 0;
-  const cancelTouchPress = () => { touchPress = null; };
+  const clearTouchPress = pointerId => {
+    if (pointerId != null && touchPress?.pointerId !== pointerId) return;
+    touchPress = null;
+    button.classList.remove("touch-pressed");
+  };
 
   button.addEventListener("pointerdown", event => {
     if (event.pointerType !== "touch" || button.disabled) return;
     event.preventDefault();
+    clearTouchPress();
     touchPress = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, moved: false };
+    button.classList.add("touch-pressed");
     try { button.setPointerCapture(event.pointerId); } catch {}
   });
   button.addEventListener("pointermove", event => {
     if (!touchPress || event.pointerId !== touchPress.pointerId) return;
-    if (Math.hypot(event.clientX - touchPress.x, event.clientY - touchPress.y) > 10) touchPress.moved = true;
+    if (Math.hypot(event.clientX - touchPress.x, event.clientY - touchPress.y) > 10) {
+      touchPress.moved = true;
+      button.classList.remove("touch-pressed");
+    }
   });
   button.addEventListener("pointercancel", event => {
-    if (touchPress?.pointerId === event.pointerId) cancelTouchPress();
+    clearTouchPress(event.pointerId);
+  });
+  button.addEventListener("lostpointercapture", event => {
+    clearTouchPress(event.pointerId);
   });
   button.addEventListener("pointerup", event => {
     if (event.pointerType !== "touch" || touchPress?.pointerId !== event.pointerId) return;
     const shouldActivate = !touchPress.moved && !button.disabled;
-    cancelTouchPress();
+    clearTouchPress(event.pointerId);
     event.preventDefault();
     // pointerup is the direct end of the physical touch contact. Act here instead
     // of waiting for WebKit's synthesized click recognition. Keep suppression

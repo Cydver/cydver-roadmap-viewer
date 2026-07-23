@@ -4696,6 +4696,24 @@ body {
   }
 }
 
+/* iOS can retain :hover after a successful touch tap until another element becomes
+   the hover target. Do not use desktop hover as touch feedback: the direct-touch
+   handler owns a short-lived class and clears it on up/cancel/lost capture. */
+@media (pointer: coarse) {
+  .unit-profile-nav:hover {
+    border-color: rgba(99,211,255,.28);
+    background: rgba(5,10,17,.96);
+    color: #dff7ff;
+    box-shadow: 0 14px 34px rgba(0,0,0,.38), inset 0 1px 0 rgba(255,255,255,.055);
+  }
+  .unit-profile-nav.touch-pressed {
+    border-color: rgba(99,211,255,.5);
+    background: rgba(24,55,70,.94);
+    color: #fff;
+    box-shadow: 0 10px 26px rgba(0,0,0,.34), 0 0 0 1px rgba(99,211,255,.05), inset 0 1px 0 rgba(255,255,255,.07);
+  }
+}
+
 /* Mobile direct-manipulation latency: profile controls own a tap completely and
    adaptive card metadata changes settle without opacity/visibility animations. */
 @media (pointer: coarse) {
