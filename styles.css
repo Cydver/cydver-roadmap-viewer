@@ -4854,21 +4854,10 @@ body {
   }
 }
 
-/* Mobile profile first-frame latency + close-corner title guard.
-   The card is already stationary on coarse pointers; do not fade the entire
-   profile surface from transparent after a physical tap. This also avoids a
-   full-viewport opacity animation competing with the first profile paint. */
-@media (pointer: coarse) {
-  .unit-profile-overlay {
-    animation: none;
-  }
-}
-
 @media (orientation: portrait) and (max-width: 600px) and (pointer: coarse),
        (orientation: landscape) and (max-height: 600px) and (pointer: coarse) {
-  /* Reserve only the first title line's top-right corner for the 44px close
-     target. A short float shapes text around that corner without narrowing every
-     wrapped line or the rest of the full-width hero. */
+  /* Keep only the first MS-name line clear of the mobile close target without
+     narrowing the rest of the hero or subsequent wrapped title lines. */
   .unit-profile-grid-lshape > .unit-profile-ms-panel .unit-profile-identity h2::before {
     content: "";
     float: right;

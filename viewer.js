@@ -2246,23 +2246,9 @@ function scheduleUnitProfileBindingTimeout(callback, delay, generation, root) {
   unitProfileBindingTimers.add(timer);
 }
 
-function scheduleUnitProfileContentBindings(overlay, grid = null) {
+function scheduleUnitProfileContentBindings(overlay) {
   const generation = unitProfileBindingGeneration;
   if (isMobileTouchViewport()) {
-    // None of the profile tooltip listeners contribute to the first visible frame.
-    // Leave the tap -> modal paint path as small as possible on iOS, then attach
-    // those secondary interactions after the browser has had a rendering
-    // opportunity. The generation guard makes rapid open/nav/close cancellable.
-    unitProfileBindingFrame = requestAnimationFrame(() => {
-      unitProfileBindingFrame = requestAnimationFrame(() => {
-        unitProfileBindingFrame = 0;
-        if (generation !== unitProfileBindingGeneration || unitProfileOverlay !== overlay || !overlay.isConnected) return;
-        const liveGrid = grid?.isConnected ? grid : overlay.querySelector(".unit-profile-grid");
-        bindProfileTagTooltips(liveGrid);
-        bindProfileMetaTooltips(liveGrid);
-        bindProfileAltemaTooltips(liveGrid);
-      });
-    });
     // Mobile profiles deliberately show their full notes in the stacked scroll
     // surface and hide the overflow-reader affordance. Do not create observers or
     // layout reads for a control that cannot appear on this presentation.
@@ -2319,14 +2305,10 @@ function updateUnitProfileContent(overlay, unitId, activeSegmentId = null) {
   bindUnitProfileImageFallbacks(grid);
   if (card) card.scrollTop = 0;
 
-  if (isMobileTouchViewport()) {
-    scheduleUnitProfileContentBindings(overlay, grid);
-  } else {
-    bindProfileTagTooltips(grid);
-    bindProfileMetaTooltips(grid);
-    bindProfileAltemaTooltips(grid);
-    scheduleUnitProfileContentBindings(overlay);
-  }
+  bindProfileTagTooltips(grid);
+  bindProfileMetaTooltips(grid);
+  bindProfileAltemaTooltips(grid);
+  scheduleUnitProfileContentBindings(overlay);
   setMetaOwnerProfile(ms?.id || null);
 
   return { clicked, ms, pilot };
