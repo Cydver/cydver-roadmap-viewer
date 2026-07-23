@@ -178,19 +178,6 @@ h1 {
   transform-origin: 0 0;
 }
 
-/* The outer chart stage owns scroll extent. The inner visual stage owns only
-   the rendered roadmap surface, allowing mobile pinch bursts to retain a cheap
-   larger scroll extent without transforming that mostly-empty outer box. */
-.chart-visual-stage {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 100%;
-  height: 100%;
-  transform-origin: 0 0;
-  backface-visibility: visible;
-}
-
 .roadmap {
   position: relative;
   min-width: 100%;
@@ -4567,17 +4554,6 @@ body {
     backface-visibility: visible;
   }
   .chart-scroll.touch-gesturing .chart-stage {
-    will-change: transform;
-    backface-visibility: hidden;
-  }
-  /* On the restored WebKit-native pinch path, chart-stage may deliberately keep
-     a larger scroll extent between rapid lift/re-pinch contacts. Promote only
-     the exact-size visual surface so live pinch never animates that empty extent. */
-  .chart-scroll.webkit-native-gesture-input.touch-gesturing .chart-stage {
-    will-change: auto;
-    backface-visibility: visible;
-  }
-  .chart-scroll.webkit-native-gesture-input.touch-gesturing .chart-visual-stage {
     will-change: transform;
     backface-visibility: hidden;
   }
