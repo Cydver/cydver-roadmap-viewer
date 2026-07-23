@@ -2433,10 +2433,13 @@ function closeUnitProfile(immediate = false) {
     return;
   }
   if (isMobileTouchViewport()) {
-    // Keep the just-touched modal in the hit-test tree through the compatibility
-    // click turn. This is visually at most one frame, but prevents WebKit from
-    // retargeting that same tap to the top-right Pull Calc button underneath.
-    requestAnimationFrame(finish);
+    // Direct-touch controls already arm one-contact compatibility-click suppression
+    // before invoking this close. Remove the modal in the physical pointerup handler
+    // instead of waiting for a later animation frame: when WebKit is under rendering
+    // pressure, that frame can arrive much later even though the close input itself
+    // was delivered promptly. The capture-phase suppression still prevents the same
+    // Safari compatibility click from activating the control exposed underneath.
+    finish();
     return;
   }
 

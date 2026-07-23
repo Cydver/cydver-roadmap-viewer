@@ -3446,6 +3446,12 @@ body {
   .unit-profile-overlay.closing .unit-profile-card {
     animation: none;
   }
+  /* The mobile card has fixed viewport geometry and owns its own scrolling. Keep
+     rapid Previous/Next content replacement from propagating layout/style work
+     back into the large roadmap page underneath the modal. */
+  .unit-profile-card {
+    contain: layout style;
+  }
   .unit-profile-overlay.closing {
     animation-duration: .08s;
   }
