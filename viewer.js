@@ -2609,10 +2609,11 @@ function isMobileTouchViewport() {
   return Boolean(window.matchMedia?.("(pointer: coarse)")?.matches);
 }
 function useMobileTransformCamera() {
-  // Keep mobile navigation in one compositor transform coordinate system. Baking
-  // every completed pinch back into roadmap scale + stage dimensions forces a
-  // large layout/raster handoff and is the remaining source of pinch-end stalls.
-  return isMobileTouchViewport();
+  // The persistent whole-stage transform camera is intentionally disabled. Real
+  // iPhone Safari testing showed severe pan/pinch freezes when this path stayed
+  // active between gestures. Keep the dormant implementation available for
+  // isolated investigation without changing the proven scroll-backed mobile path.
+  return false;
 }
 function minimumZoom() {
   return isMobileTouchViewport() ? MOBILE_MIN_ZOOM : MIN_ZOOM;
