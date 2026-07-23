@@ -1072,15 +1072,15 @@ function renderUnit(unit) {
     // only creates competing work; desktop retains its existing proactive warmup.
     if (!isMobileTouchViewport()) warmProfilePairImages(unit);
   }, { passive: true });
-  card.addEventListener("click", event => {
-    event.stopPropagation();
-    if (suppressRoadmapClick || performance.now() < suppressTouchClickUntil) return;
+  const activateCard = event => {
+    const directTouch = event?.type === "pointerup" && event.pointerType === "touch";
+    if (suppressRoadmapClick || (!directTouch && performance.now() < suppressTouchClickUntil)) return;
     if (customUnitFilterEditing) {
       toggleCustomUnitFilterDraft(unit);
       return;
     }
     bringUnitToFront(unit.id);
-    const rememberTouchOwner = isMobileTouchViewport() && (event.pointerType === "touch" || lastInputModality === "touch");
+    const rememberTouchOwner = isMobileTouchViewport() && (event?.pointerType === "touch" || lastInputModality === "touch");
     const touchOwnerId = rememberTouchOwner ? (metaOwner?.id || null) : null;
     // Open the modal before recording touch ownership. setMetaOwnerTouchSelection()
     // deliberately avoids repainting the large roadmap while a mobile profile is
@@ -1088,6 +1088,11 @@ function renderUnit(unit) {
     // the full-roadmap dimmer immediately underneath the profile.
     openUnitProfile(unit.id);
     if (rememberTouchOwner) setMetaOwnerTouchSelection(touchOwnerId);
+  };
+  bindDirectTouchRoadmapActivation(card, activateCard);
+  card.addEventListener("click", event => {
+    event.stopPropagation();
+    activateCard(event);
   });
   card.addEventListener("pointerenter", event => {
     if (event.pointerType === "touch") return;
@@ -1152,18 +1157,23 @@ function renderSegment(unit, segment, index = 0, total = 1) {
   label.__uceMetaLabelMetrics = immutableMetaLabelMetrics(bar, label);
   bar.appendChild(label);
 
-  bar.addEventListener("click", event => {
-    event.stopPropagation();
-    if (suppressRoadmapClick || performance.now() < suppressTouchClickUntil) return;
+  const activateMetaBar = event => {
+    const directTouch = event?.type === "pointerup" && event.pointerType === "touch";
+    if (suppressRoadmapClick || (!directTouch && performance.now() < suppressTouchClickUntil)) return;
     if (customUnitFilterEditing) {
       toggleCustomUnitFilterDraft(unit);
       return;
     }
-    const rememberTouchOwner = isMobileTouchViewport() && (event.pointerType === "touch" || lastInputModality === "touch");
+    const rememberTouchOwner = isMobileTouchViewport() && (event?.pointerType === "touch" || lastInputModality === "touch");
     // As with roadmap cards, defer the visual ownership reconciliation until the
     // profile closes. The logical selection is still updated while the modal is up.
     openUnitProfile(unit.id, segment.id);
     if (rememberTouchOwner) setMetaOwnerTouchSelection(unit.id);
+  };
+  bindDirectTouchRoadmapActivation(bar, activateMetaBar);
+  bar.addEventListener("click", event => {
+    event.stopPropagation();
+    activateMetaBar(event);
   });
   bar.addEventListener("pointerenter", event => {
     if (event.pointerType === "touch" || customUnitFilterEditing) return;
@@ -2291,6 +2301,49 @@ function applyUnitProfileNavigationTarget(overlay, targetId, direction = 0) {
   return updated;
 }
 
+function armDirectTouchClickSuppression(event, duration = 800) {
+  pendingDirectTouchClickSuppression = {
+    x: Number(event?.clientX) || 0,
+    y: Number(event?.clientY) || 0,
+    until: performance.now() + duration
+  };
+}
+
+function bindDirectTouchRoadmapActivation(element, action) {
+  if (!element || typeof action !== "function") return;
+  let touchPress = null;
+
+  element.addEventListener("pointerdown", event => {
+    if (event.pointerType !== "touch" || event.isPrimary === false) return;
+    touchPress = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, moved: false };
+    try { element.setPointerCapture(event.pointerId); } catch {}
+  });
+  element.addEventListener("pointermove", event => {
+    if (!touchPress || event.pointerId !== touchPress.pointerId) return;
+    if (Math.hypot(event.clientX - touchPress.x, event.clientY - touchPress.y) > 4) touchPress.moved = true;
+  });
+  element.addEventListener("pointercancel", event => {
+    if (touchPress?.pointerId === event.pointerId) touchPress = null;
+  });
+  element.addEventListener("pointerup", event => {
+    if (event.pointerType !== "touch" || touchPress?.pointerId !== event.pointerId) return;
+    const shouldActivate = !touchPress.moved
+      && touchPoints.size <= 1
+      && !touchPanGesture?.moved
+      && !pinchGesture;
+    touchPress = null;
+    if (!shouldActivate) return;
+
+    // Use the physical end of the tap instead of waiting for Safari's synthesized
+    // click. Keep the event bubbling so the chart-level touch state machine can
+    // finish this same pointer normally, and swallow only the compatibility click
+    // that may be retargeted to the newly opened modal.
+    event.preventDefault();
+    armDirectTouchClickSuppression(event);
+    action(event);
+  });
+}
+
 function bindDirectTouchActionButton(button, action) {
   if (!button || typeof action !== "function") return;
   let touchPress = null;
@@ -2320,11 +2373,7 @@ function bindDirectTouchActionButton(button, action) {
     // local to the compatibility click from this exact contact; a blanket roadmap
     // dead-period would make a legitimate next tap feel lost.
     suppressClickUntil = performance.now() + 800;
-    pendingDirectTouchClickSuppression = {
-      x: Number(event.clientX) || 0,
-      y: Number(event.clientY) || 0,
-      until: performance.now() + 800
-    };
+    armDirectTouchClickSuppression(event);
     event.stopPropagation();
     if (shouldActivate) action(event);
   });
@@ -4575,9 +4624,12 @@ function flushTouchGestureFrame() {
       touchPanGesture.targetCameraY = camera.y;
       return;
     }
-    const translateX = touchPanGesture.startScrollLeft - frame.scrollLeft;
-    const translateY = touchPanGesture.startScrollTop - frame.scrollTop;
-    els.chartStage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0)`;
+    // Keep one-finger navigation on the scroll-backed camera. The persistent
+    // transform camera is already disabled after real-iPhone regressions; avoiding
+    // even a temporary whole-stage transform during ordinary drag also keeps WebKit
+    // from promoting/rasterizing the full roadmap just to move the viewport.
+    els.chartScroll.scrollLeft = frame.scrollLeft;
+    els.chartScroll.scrollTop = frame.scrollTop;
     touchPanGesture.targetScrollLeft = frame.scrollLeft;
     touchPanGesture.targetScrollTop = frame.scrollTop;
   }
@@ -4824,9 +4876,9 @@ function beginTouchGesture(event) {
   touchPoints.set(event.pointerId, point);
 
   // Keep the entire mobile chart under app control (touch-action:none). A single
-  // finger uses a compositor-only translate and two fingers use translate+scale,
-  // which avoids the browser cancelling the first pointer when a native pan has
-  // already started before the second finger lands.
+  // finger drives the existing scroll-backed camera while two fingers use the
+  // temporary pinch preview transform, so the pointer stream stays app-owned
+  // without reviving the failed persistent transform-camera architecture.
   if (touchPoints.size === 1) {
     beginTouchPan(event.pointerId, point);
     return;
@@ -4887,7 +4939,6 @@ function moveTouchGesture(event) {
   if (!touchPanGesture.moved && Math.hypot(dx, dy) <= 4) return;
   if (!touchPanGesture.moved) {
     touchPanGesture.moved = true;
-    els.chartScroll.classList.add("touch-gesturing");
   }
   pendingTouchPanFrame = useMobileTransformCamera()
     ? {
