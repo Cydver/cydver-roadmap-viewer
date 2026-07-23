@@ -4730,26 +4730,14 @@ body {
   }
 }
 
-/* --- Mobile baseline polish: edge-safe profile navigation + stable vector grid --- */
-.grid-vector-layer {
+/* --- Mobile baseline polish: edge-safe profile navigation + desktop-parity grid --- */
+.mobile-grid-structure-layer {
   position: absolute;
   inset: 0;
-  width: 100%;
-  height: 100%;
-  overflow: visible;
   pointer-events: none;
 }
-.grid-vector-line {
-  fill: none;
-  stroke: var(--line);
-  stroke-width: 1;
-  vector-effect: non-scaling-stroke;
-  shape-rendering: crispEdges;
-  pointer-events: none;
-}
-.grid-vector-line.month {
-  stroke: var(--line-strong);
-  stroke-width: 2;
+.mobile-grid-structure-layer .grid-line.v.month {
+  width: calc(var(--gridLine) + var(--gridLine));
 }
 
 @media (pointer: coarse) {
@@ -4767,14 +4755,33 @@ body {
   }
 }
 
-@media (orientation: portrait) and (max-width: 600px) and (pointer: coarse) {
-  /* The former 12px invisible extension pointed outward into Safari's screen-edge
-     gesture zone. Keep the same 44px effective target, but place it inward. */
-  .unit-profile-nav-prev {
-    left: max(10px, calc(env(safe-area-inset-left) + 6px));
+@media (orientation: portrait) and (max-width: 600px) and (pointer: coarse),
+       (orientation: landscape) and (max-height: 600px) and (pointer: coarse) {
+  /* Keep the visible controls clear of every profile section at every scroll
+     position. The 44px content rail is shared by the whole profile, so identity,
+     investment, meta and notes stay on one aligned column instead of receiving
+     section-specific indents. */
+  .unit-profile-grid-lshape > .unit-profile-ms-panel,
+  .unit-profile-grid-lshape > .unit-profile-pilot-panel > .unit-profile-pilot-primary,
+  .unit-profile-ms-notes-band > .unit-profile-ms-note-cell,
+  .unit-profile-grid-lshape > .unit-profile-pve-slot {
+    padding-left: 44px;
+    padding-right: 44px;
   }
-  .unit-profile-nav-next {
-    right: max(10px, calc(env(safe-area-inset-right) + 6px));
+
+  /* The visible arrow is narrower than its touch target. The invisible extension
+     points inward, away from Safari's screen-edge gesture zone, and ends exactly
+     at the profile content rail. */
+  .unit-profile-nav {
+    width: 36px;
+    min-width: 36px;
+    height: 48px;
+    min-height: 48px;
+  }
+  .unit-profile-nav::after {
+    top: -2px;
+    bottom: -2px;
+    width: 8px;
   }
   .unit-profile-nav-prev::after {
     left: 100%;
@@ -4784,12 +4791,14 @@ body {
     left: auto;
     right: 100%;
   }
+}
 
-  /* Profile navigation lives at mid-viewport. Give long MS note copy a real
-     navigation gutter so simple/skip profiles cannot run text under the arrows. */
-  .unit-profile-ms-notes-band > .unit-profile-ms-note-cell {
-    padding-left: 52px;
-    padding-right: 52px;
+@media (orientation: portrait) and (max-width: 600px) and (pointer: coarse) {
+  .unit-profile-nav-prev {
+    left: max(10px, calc(env(safe-area-inset-left) + 6px));
+  }
+  .unit-profile-nav-next {
+    right: max(10px, calc(env(safe-area-inset-right) + 6px));
   }
 }
 
@@ -4799,17 +4808,5 @@ body {
   }
   .unit-profile-nav-next {
     right: max(8px, calc(env(safe-area-inset-right) + 5px));
-  }
-  .unit-profile-nav-prev::after {
-    left: 100%;
-    right: auto;
-  }
-  .unit-profile-nav-next::after {
-    left: auto;
-    right: 100%;
-  }
-  .unit-profile-ms-notes-band > .unit-profile-ms-note-cell {
-    padding-left: 52px;
-    padding-right: 52px;
   }
 }

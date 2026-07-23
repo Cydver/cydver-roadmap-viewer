@@ -135,6 +135,7 @@ let mobileMetaLabelEntriesCache = [];
 let mobileTierLabelEntriesCache = [];
 let mobileGridVerticalCache = [];
 let mobileGridHorizontalCache = [];
+let mobileGridStructureLayer = null;
 let unitProfileBindingGeneration = 0;
 let unitProfileBindingFrame = 0;
 const unitProfileBindingTimers = new Set();
@@ -980,19 +981,18 @@ function renderChart() {
     monthBoundaries.add(next);
     return next;
   }, 0);
-  if (isMobileTouchViewport()) {
-    addMobileVectorGrid(width, height, monthBoundaries);
-  } else {
-    for (let w = 0; w <= weekCount(); w++) {
-      const line = addDiv(`grid-line v${monthBoundaries.has(w) ? " month" : ""}`, {
-        left: `${weekBoundaryX(w)}px`
-      });
-      line.style.height = monthBoundaries.has(w) ? "100%" : `${height - HEADER_H}px`;
-    }
-
-    getTiers().forEach(tier => addDiv("grid-line h", { top: `${tierY(tier.id)}px` }));
-    addDiv("grid-line h", { top: `${height}px` });
+  const gridAdd = isMobileTouchViewport()
+    ? createMobileGridStructureLayer(width, height)
+    : addDiv;
+  for (let w = 0; w <= weekCount(); w++) {
+    const line = gridAdd(`grid-line v${monthBoundaries.has(w) ? " month" : ""}`, {
+      left: `${weekBoundaryX(w)}px`
+    });
+    line.style.height = monthBoundaries.has(w) ? "100%" : `${height - HEADER_H}px`;
   }
+
+  getTiers().forEach(tier => gridAdd("grid-line h", { top: `${tierY(tier.id)}px` }));
+  gridAdd("grid-line h", { top: `${height}px` });
 
   getTiers().forEach(tier => {
     for (let lane = 1; lane <= visibleLaneCount(tier.id); lane++) {
@@ -2729,42 +2729,29 @@ function addDiv(className, style = {}) {
   return el;
 }
 
-function addMobileVectorGrid(width, height, monthBoundaries) {
-  const svgNs = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(svgNs, "svg");
-  svg.classList.add("grid-vector-layer");
-  svg.setAttribute("width", String(width));
-  svg.setAttribute("height", String(height));
-  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  svg.setAttribute("preserveAspectRatio", "none");
-  svg.setAttribute("aria-hidden", "true");
-  svg.setAttribute("focusable", "false");
+function createMobileGridStructureLayer(width, height) {
+  const layer = document.createElement("div");
+  layer.className = "mobile-grid-structure-layer";
+  layer.style.width = `${width}px`;
+  layer.style.height = `${height}px`;
+  layer.setAttribute("aria-hidden", "true");
+  els.roadmap.appendChild(layer);
+  mobileGridStructureLayer = layer;
+  applyMobileGridStructuralVariables(zoomScale);
 
-  const addLine = (className, x1, y1, x2, y2) => {
-    const line = document.createElementNS(svgNs, "line");
-    line.setAttribute("class", className);
-    line.setAttribute("x1", String(x1));
-    line.setAttribute("y1", String(y1));
-    line.setAttribute("x2", String(x2));
-    line.setAttribute("y2", String(y2));
-    // Keep structural strokes in screen space while the roadmap is temporarily
-    // transformed during a pinch. This avoids per-line width rewrites in the
-    // gesture loop and removes the visible thick/thin snap at pinch commit.
-    line.setAttribute("vector-effect", "non-scaling-stroke");
-    svg.appendChild(line);
+  return (className, style = {}) => {
+    const el = document.createElement("div");
+    el.className = className;
+    Object.assign(el.style, style);
+    layer.appendChild(el);
+    return el;
   };
+}
 
-  for (let w = 0; w <= weekCount(); w++) {
-    const month = monthBoundaries.has(w);
-    const x = weekBoundaryX(w);
-    addLine(`grid-vector-line v${month ? " month" : ""}`, x, month ? 0 : HEADER_H, x, height);
-  }
-  getTiers().forEach(tier => {
-    const y = tierY(tier.id);
-    addLine("grid-vector-line h", 0, y, width, y);
-  });
-  addLine("grid-vector-line h", 0, height, width, height);
-  els.roadmap.appendChild(svg);
+function applyMobileGridStructuralVariables(scale = zoomScale) {
+  if (!mobileGridStructureLayer?.isConnected) return;
+  const gridLinePx = clamp(1 / Math.max(0.001, Number(scale) || 1), 1, 1 / minimumZoom());
+  mobileGridStructureLayer.style.setProperty("--gridLine", `${gridLinePx.toFixed(2)}px`);
 }
 
 function isMobileTouchViewport() {
@@ -2868,7 +2855,10 @@ function applyZoomGeometry() {
   if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
 }
 function applyZoomStructuralVariables() {
-  if (isMobileTouchViewport()) return;
+  if (isMobileTouchViewport()) {
+    applyMobileGridStructuralVariables(zoomScale);
+    return;
+  }
   const gridLinePx = clamp(1 / zoomScale, 1, 1 / minimumZoom());
   els.roadmap.style.setProperty("--gridLine", `${gridLinePx.toFixed(2)}px`);
   els.roadmap.style.setProperty("--monthGridLine", `${(gridLinePx * 2).toFixed(2)}px`);
@@ -3090,14 +3080,14 @@ function scheduleMobileZoomStyleWork(scale = zoomScale) {
   const barBoost = barLabelTextScale(scale).toFixed(3);
   const viewport = mobileSemanticViewportRect(scale);
 
-  const verticalLines = mobileGridVerticalCache.filter(line => {
+  const verticalLines = mobileGridStructureLayer?.isConnected ? [] : mobileGridVerticalCache.filter(line => {
     if (!line?.isConnected) return false;
     const x = Number.parseFloat(line.style.left) || 0;
     if (x < viewport.left || x > viewport.right) return false;
     const desired = line.classList.contains("month") ? monthGridLine : gridLine;
     return line.style.width !== desired;
   });
-  const horizontalLines = mobileGridHorizontalCache.filter(line => {
+  const horizontalLines = mobileGridStructureLayer?.isConnected ? [] : mobileGridHorizontalCache.filter(line => {
     if (!line?.isConnected) return false;
     const y = Number.parseFloat(line.style.top) || 0;
     return y >= viewport.top && y <= viewport.bottom && line.style.height !== gridLine;
@@ -3166,8 +3156,9 @@ function scheduleMobileZoomStyleWork(scale = zoomScale) {
 }
 function applyZoomSemanticVariables() {
   if (isMobileTouchViewport()) {
-    // Mobile semantic/structural writes are committed by the cancellable local
-    // style worker. Keep this synchronous phase free of roadmap-wide invalidation.
+    // The structural grid is isolated in its own tiny layer, so matching desktop
+    // line weight is safe to update synchronously without invalidating the roadmap.
+    applyZoomStructuralVariables();
     return;
   }
   els.roadmap.style.setProperty("--textBoost", legibleTextScale().toFixed(3));
@@ -3573,6 +3564,7 @@ function rebuildMobileStaticPresentationIndex() {
     mobileTierLabelEntriesCache = [];
     mobileGridVerticalCache = [];
     mobileGridHorizontalCache = [];
+    mobileGridStructureLayer = null;
     mobileCardNameMetricsById.clear();
     return;
   }
@@ -4677,6 +4669,7 @@ function scheduleTouchGestureFrame() {
 function applyPinchPreviewFrame(frame) {
   if (!frame || !pinchGesture) return;
   const nextZoom = clamp(Number(frame.zoom) || zoomScale, minimumZoom(), MAX_ZOOM);
+  if (isMobileTouchViewport()) applyMobileGridStructuralVariables(nextZoom);
   const localX = frame.midpointX - pinchGesture.rectLeft;
   const localY = frame.midpointY - pinchGesture.rectTop;
 
