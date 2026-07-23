@@ -298,6 +298,7 @@ let viewerLocalStateCache = { version: 1, filtersByRoadmap: {} };
 const els = {
   roadmap: document.getElementById("roadmap"),
   chartStage: document.getElementById("chartStage"),
+  chartVisualStage: document.getElementById("chartVisualStage"),
   chartScroll: document.getElementById("chartScroll"),
   legend: document.getElementById("statusLegend"),
   legendPanel: document.querySelector(".legend-panel"),
@@ -2853,6 +2854,14 @@ function handleWheelZoom(event) {
   setZoomAtClientPoint(zoomScale * factor, event.clientX, event.clientY);
 }
 
+function setChartVisualStageGeometry(width, height, scale = zoomScale) {
+  if (!els.chartVisualStage) return;
+  els.chartVisualStage.style.width = `${width * scale}px`;
+  els.chartVisualStage.style.height = `${height * scale}px`;
+}
+function nativePinchVisualStage() {
+  return useWebKitNativeGestureInput && els.chartVisualStage ? els.chartVisualStage : els.chartStage;
+}
 function applyZoomGeometry() {
   const width = baseChartWidth();
   const height = baseChartHeight();
@@ -2864,14 +2873,18 @@ function applyZoomGeometry() {
     els.roadmap.style.transform = "";
     els.chartStage.style.width = `${width}px`;
     els.chartStage.style.height = `${height}px`;
+    setChartVisualStageGeometry(width, height, 1);
+    if (els.chartVisualStage) els.chartVisualStage.style.transform = "";
     if (els.chartScroll.scrollLeft) els.chartScroll.scrollLeft = 0;
     if (els.chartScroll.scrollTop) els.chartScroll.scrollTop = 0;
     applyMobileCameraTransform(mobileCameraX, mobileCameraY, zoomScale);
   } else {
     els.chartStage.style.transform = "";
+    if (els.chartVisualStage) els.chartVisualStage.style.transform = "";
     els.roadmap.style.transform = `scale(${zoomScale})`;
     els.chartStage.style.width = `${width * zoomScale}px`;
     els.chartStage.style.height = `${height * zoomScale}px`;
+    setChartVisualStageGeometry(width, height, zoomScale);
   }
   mobileStageGeometryScale = zoomScale;
   if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
@@ -4681,8 +4694,12 @@ function touchPairGeometry() {
 }
 function clearTouchStageTransform() {
   if (!els.chartStage) return;
-  if (useMobileTransformCamera()) applyMobileCameraTransform();
-  else els.chartStage.style.transform = "";
+  if (useMobileTransformCamera()) {
+    applyMobileCameraTransform();
+    return;
+  }
+  els.chartStage.style.transform = "";
+  if (els.chartVisualStage) els.chartVisualStage.style.transform = "";
 }
 function scheduleTouchGestureFrame() {
   if (touchGestureFrame) return;
@@ -4717,7 +4734,7 @@ function applyPinchPreviewFrame(frame) {
   const targetScrollTop = clamp(pinchGesture.anchorStageY * ratio - localY, 0, maxScrollTop);
   const translateX = pinchGesture.startScrollLeft - targetScrollLeft;
   const translateY = pinchGesture.startScrollTop - targetScrollTop;
-  els.chartStage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0) scale(${ratio})`;
+  nativePinchVisualStage().style.transform = `translate3d(${translateX}px, ${translateY}px, 0) scale(${ratio})`;
   pinchGesture.finalZoom = nextZoom;
   pinchGesture.targetScrollLeft = targetScrollLeft;
   pinchGesture.targetScrollTop = targetScrollTop;
@@ -4888,7 +4905,12 @@ function commitWebKitNativePinchVisual(nextZoom, targetScrollLeft, targetScrollT
     applyZoomGeometry();
   } else {
     els.chartStage.style.transform = "";
+    if (els.chartVisualStage) els.chartVisualStage.style.transform = "";
     els.roadmap.style.transform = `scale(${zoomScale})`;
+    // Keep the outer chartStage at the retained scroll extent, but shrink the
+    // inner visual surface immediately. The next live pinch therefore transforms
+    // only the pixels that are actually visible at the committed zoom.
+    setChartVisualStageGeometry(baseChartWidth(), baseChartHeight(), zoomScale);
     if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
     mobileStageShrinkPending = zoomScale < mobileStageGeometryScale - 0.0001;
   }
