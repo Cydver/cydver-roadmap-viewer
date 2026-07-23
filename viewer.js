@@ -120,6 +120,7 @@ let lastInputModality = "pointer";
 let profileReturnFocusByKeyboard = false;
 let useWebKitNativeGestureInput = false;
 let webKitPinchGesture = null;
+let webKitNativeTouchHadPinch = false;
 let touchZoomSemanticTimer = 0;
 let touchZoomSemanticFrame = 0;
 let touchZoomSemanticDirty = false;
@@ -454,14 +455,30 @@ function bindControls() {
   });
   els.chartScroll.addEventListener("wheel", handleWheelZoom, { passive: false });
 
-  // The mobile roadmap is one app-owned interaction surface. Mixing Safari native
-  // momentum scrolling with a separate GestureEvent pinch path creates two owners
-  // for the same scroll position/gesture lifetime and can leave momentum work racing
-  // a newly committed pinch. Modern Safari supports Pointer Events, so coarse-pointer
-  // pan + pinch stay in the same cancel-safe state machine and native overflow does
-  // not participate in roadmap navigation.
-  useWebKitNativeGestureInput = false;
-  els.chartScroll.classList.remove("webkit-native-gesture-input");
+  // The smooth pre-11754ed iPhone path lets WebKit own one-finger momentum scrolling
+  // and consumes WebKit's native GestureEvent scale only for pinch. Keep the newer
+  // Pointer Events state machine as the fallback everywhere else. This does NOT
+  // re-enable the failed persistent transform-camera architecture.
+  useWebKitNativeGestureInput = isMobileTouchViewport()
+    && ("ongesturestart" in window || typeof window.GestureEvent === "function");
+  els.chartScroll.classList.toggle("webkit-native-gesture-input", useWebKitNativeGestureInput);
+  if (useWebKitNativeGestureInput) {
+    els.chartScroll.addEventListener("gesturestart", beginWebKitPinchGesture, { passive: false });
+    els.chartScroll.addEventListener("gesturechange", moveWebKitPinchGesture, { passive: false });
+    els.chartScroll.addEventListener("gestureend", endWebKitPinchGesture, { passive: false });
+    els.chartScroll.addEventListener("touchstart", markWebKitTouchActive, { passive: true });
+    els.chartScroll.addEventListener("touchend", endWebKitTouchActive, { passive: true });
+    els.chartScroll.addEventListener("touchcancel", cancelWebKitTouchActive, { passive: true });
+    if ("onscrollend" in els.chartScroll) {
+      els.chartScroll.addEventListener("scrollend", () => {
+        // Safari 26.2+ gives us a definitive native-scroll completion signal.
+        // Resume interrupted zoom semantics only after momentum actually stops;
+        // unchanged-zoom pans need just the visible/prefetch reconciliation.
+        if (touchZoomSemanticDirty) maybeScheduleDeferredTouchZoomPresentation();
+        else scheduleMobileViewportSemanticCatchup();
+      });
+    }
+  }
 
   els.chartScroll.addEventListener("pointerdown", beginTouchGesture);
   els.roadmap.addEventListener("lostpointercapture", handleLostPanPointerCapture);
@@ -2344,6 +2361,35 @@ function bindDirectTouchRoadmapActivation(element, action) {
   });
 }
 
+function bindDirectTouchImmediateDismissButton(button, action) {
+  if (!button || typeof action !== "function") return;
+  let suppressClickUntil = 0;
+
+  button.addEventListener("pointerdown", event => {
+    if (event.pointerType !== "touch" || event.isPrimary === false || button.disabled) return;
+
+    // The close control is a dismissal action, so there is no drag destination to
+    // resolve. Dismiss on the earliest physical event Safari has already delivered
+    // instead of waiting for pointerup when WebKit is intermittently under main-
+    // thread/rendering pressure. Preserve the existing one-contact compatibility-
+    // click shield so removing the modal cannot retarget the same tap underneath.
+    event.preventDefault();
+    suppressClickUntil = performance.now() + 800;
+    armDirectTouchClickSuppression(event);
+    event.stopPropagation();
+    action(event);
+  });
+  button.addEventListener("click", event => {
+    if (performance.now() < suppressClickUntil) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    event.stopPropagation();
+    action(event);
+  });
+}
+
 function bindDirectTouchActionButton(button, action) {
   if (!button || typeof action !== "function") return;
   let touchPress = null;
@@ -2432,7 +2478,7 @@ function openUnitProfile(unitId, activeSegmentId = null) {
 
   overlay.addEventListener("click", event => { if (event.target === overlay) closeUnitProfile(); });
   overlay.addEventListener("keydown", event => trapModalTabKey(overlay, event));
-  bindDirectTouchActionButton(overlay.querySelector(".unit-profile-close"), () => closeUnitProfile());
+  bindDirectTouchImmediateDismissButton(overlay.querySelector(".unit-profile-close"), () => closeUnitProfile());
   bindDirectTouchActionButton(overlay.querySelector(".unit-profile-nav-prev"), () => navigateUnitProfile(-1));
   bindDirectTouchActionButton(overlay.querySelector(".unit-profile-nav-next"), () => navigateUnitProfile(1));
 
@@ -4758,7 +4804,9 @@ function beginPinchGesture() {
 }
 function markWebKitTouchActive(event) {
   if (!useWebKitNativeGestureInput) return;
-  if ((event.touches?.length || 0) > 0) {
+  const touchCount = event.touches?.length || 0;
+  if (touchCount > 0) {
+    if (touchCount === 1 && !webKitPinchGesture && !pinchGesture) webKitNativeTouchHadPinch = false;
     els.chartScroll.classList.add("touch-active");
     cancelDeferredTouchZoomPresentation();
   } else {
@@ -4785,10 +4833,21 @@ function endWebKitTouchActive(event) {
   if ((event.touches?.length || 0) < 2 && (webKitPinchGesture || pinchGesture)) {
     finishWebKitPinchGesture();
   }
-  if ((event.touches?.length || 0) === 0) maybeScheduleDeferredTouchZoomPresentation();
+  if ((event.touches?.length || 0) === 0) {
+    const hadPinch = webKitNativeTouchHadPinch;
+    webKitNativeTouchHadPinch = false;
+    if (hadPinch || !("onscrollend" in els.chartScroll)) {
+      // Pinch does not necessarily emit scrollend, so its zoom-semantic follow-up
+      // still starts from touch release. Ordinary native pan on current Safari
+      // waits for scrollend instead, avoiding semantic work during momentum.
+      maybeScheduleDeferredTouchZoomPresentation();
+      if (!touchZoomSemanticDirty) scheduleMobileViewportSemanticCatchup();
+    }
+  }
 }
 function cancelWebKitTouchActive() {
   if (!useWebKitNativeGestureInput) return;
+  webKitNativeTouchHadPinch = false;
   els.chartScroll.classList.remove("touch-active");
   finishWebKitPinchGesture();
   maybeScheduleDeferredTouchZoomPresentation();
@@ -4812,6 +4871,7 @@ function beginWebKitPinchGesture(event) {
   touchPanGesture = null;
   pendingTouchPanFrame = null;
   const scale = Math.max(0.001, Number(event.scale) || 1);
+  webKitNativeTouchHadPinch = true;
   webKitPinchGesture = { lastScale: scale };
   const clientX = Number(event.clientX);
   const clientY = Number(event.clientY);
@@ -5029,6 +5089,7 @@ function recoverInterruptedPointerInteractions({ schedulePresentation = true } =
   touchSelectionTapCandidate = null;
 
   if (useWebKitNativeGestureInput) {
+    webKitNativeTouchHadPinch = false;
     finishWebKitPinchGesture();
     els.chartScroll.classList.remove("touch-active");
   } else {

@@ -4137,6 +4137,14 @@ body {
     -webkit-overflow-scrolling: auto;
     scrollbar-width: none;
   }
+  /* Restore the proven pre-11754ed iPhone navigation owner only when JS has
+     positively detected WebKit's native GestureEvent stream. The fallback remains
+     the current app-owned Pointer Events path. */
+  .chart-scroll.webkit-native-gesture-input {
+    overflow: auto;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
+  }
   .chart-scroll::-webkit-scrollbar,
   .chart-scroll.webkit-native-gesture-input::-webkit-scrollbar {
     display: none;
