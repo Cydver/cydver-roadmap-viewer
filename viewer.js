@@ -5072,17 +5072,27 @@ function moveWebKitPinchGesture(event) {
   pinchGesture.moved = true;
   suppressTouchClickUntil = performance.now() + 400;
 
-  // Apply the latest native gesture scale immediately. WebKit batches the style
-  // mutation for presentation; avoiding an extra rAF hop removes a frame of input
-  // latency on iOS, where web content may otherwise update less frequently than a
-  // 120 Hz native UIKit gesture.
   const clientX = Number(event.clientX);
   const clientY = Number(event.clientY);
-  applyPinchPreviewFrame({
+  const previewFrame = {
     zoom: pinchGesture.previewZoom,
     midpointX: Number.isFinite(clientX) ? clientX : innerWidth / 2,
     midpointY: Number.isFinite(clientY) ? clientY : innerHeight / 2
-  });
+  };
+
+  // The first/native continuous pinch keeps the immediate path that already feels
+  // best on iPhone. During a rapid lift/re-pinch continuation, however, the freeze
+  // fix deliberately retains a larger chart-stage extent. Coalesce only that
+  // continuation stream to the latest value per rendering frame so multiple
+  // GestureEvent updates cannot repeatedly restyle the retained layer between two
+  // paints. Gesture end still flushes the final pending frame synchronously before
+  // committing zoom geometry, so there is no lost final scale or anchor position.
+  if (webKitPinchBurstContinuation) {
+    pendingTouchPinchFrame = previewFrame;
+    scheduleTouchGestureFrame();
+  } else {
+    applyPinchPreviewFrame(previewFrame);
+  }
 }
 function endWebKitPinchGesture(event) {
   if (!useWebKitNativeGestureInput) return;
