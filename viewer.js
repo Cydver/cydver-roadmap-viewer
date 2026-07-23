@@ -2376,36 +2376,7 @@ function bindDirectTouchRoadmapActivation(element, action) {
   });
 }
 
-function bindDirectTouchImmediateDismissButton(button, action) {
-  if (!button || typeof action !== "function") return;
-  let suppressClickUntil = 0;
-
-  button.addEventListener("pointerdown", event => {
-    if (event.pointerType !== "touch" || event.isPrimary === false || button.disabled) return;
-
-    // The close control is a dismissal action, so there is no drag destination to
-    // resolve. Dismiss on the earliest physical event Safari has already delivered
-    // instead of waiting for pointerup when WebKit is intermittently under main-
-    // thread/rendering pressure. Preserve the existing one-contact compatibility-
-    // click shield so removing the modal cannot retarget the same tap underneath.
-    event.preventDefault();
-    suppressClickUntil = performance.now() + 800;
-    armDirectTouchClickSuppression(event);
-    event.stopPropagation();
-    action(event);
-  });
-  button.addEventListener("click", event => {
-    if (performance.now() < suppressClickUntil) {
-      event.preventDefault();
-      event.stopPropagation();
-      return;
-    }
-    event.stopPropagation();
-    action(event);
-  });
-}
-
-function bindDirectTouchActionButton(button, action) {
+function bindDirectTouchActionButton(button, action, { requireReleaseInside = false } = {}) {
   if (!button || typeof action !== "function") return;
   let touchPress = null;
   let suppressClickUntil = 0;
@@ -2438,7 +2409,11 @@ function bindDirectTouchActionButton(button, action) {
   });
   button.addEventListener("pointerup", event => {
     if (event.pointerType !== "touch" || touchPress?.pointerId !== event.pointerId) return;
-    const shouldActivate = !touchPress.moved && !button.disabled;
+    const rect = requireReleaseInside ? button.getBoundingClientRect() : null;
+    const releasedInside = !rect
+      || (event.clientX >= rect.left && event.clientX <= rect.right
+        && event.clientY >= rect.top && event.clientY <= rect.bottom);
+    const shouldActivate = !touchPress.moved && releasedInside && !button.disabled;
     clearTouchPress(event.pointerId);
     event.preventDefault();
     // pointerup is the direct end of the physical touch contact. Act here instead
@@ -2505,7 +2480,7 @@ function openUnitProfile(unitId, activeSegmentId = null) {
 
   overlay.addEventListener("click", event => { if (event.target === overlay) closeUnitProfile(); });
   overlay.addEventListener("keydown", event => trapModalTabKey(overlay, event));
-  bindDirectTouchImmediateDismissButton(overlay.querySelector(".unit-profile-close"), () => closeUnitProfile());
+  bindDirectTouchActionButton(overlay.querySelector(".unit-profile-close"), () => closeUnitProfile(), { requireReleaseInside: true });
   bindDirectTouchActionButton(overlay.querySelector(".unit-profile-nav-prev"), () => navigateUnitProfile(-1));
   bindDirectTouchActionButton(overlay.querySelector(".unit-profile-nav-next"), () => navigateUnitProfile(1));
 
@@ -5072,27 +5047,17 @@ function moveWebKitPinchGesture(event) {
   pinchGesture.moved = true;
   suppressTouchClickUntil = performance.now() + 400;
 
+  // Apply the latest native gesture scale immediately. WebKit batches the style
+  // mutation for presentation; avoiding an extra rAF hop removes a frame of input
+  // latency on iOS, where web content may otherwise update less frequently than a
+  // 120 Hz native UIKit gesture.
   const clientX = Number(event.clientX);
   const clientY = Number(event.clientY);
-  const previewFrame = {
+  applyPinchPreviewFrame({
     zoom: pinchGesture.previewZoom,
     midpointX: Number.isFinite(clientX) ? clientX : innerWidth / 2,
     midpointY: Number.isFinite(clientY) ? clientY : innerHeight / 2
-  };
-
-  // The first/native continuous pinch keeps the immediate path that already feels
-  // best on iPhone. During a rapid lift/re-pinch continuation, however, the freeze
-  // fix deliberately retains a larger chart-stage extent. Coalesce only that
-  // continuation stream to the latest value per rendering frame so multiple
-  // GestureEvent updates cannot repeatedly restyle the retained layer between two
-  // paints. Gesture end still flushes the final pending frame synchronously before
-  // committing zoom geometry, so there is no lost final scale or anchor position.
-  if (webKitPinchBurstContinuation) {
-    pendingTouchPinchFrame = previewFrame;
-    scheduleTouchGestureFrame();
-  } else {
-    applyPinchPreviewFrame(previewFrame);
-  }
+  });
 }
 function endWebKitPinchGesture(event) {
   if (!useWebKitNativeGestureInput) return;
