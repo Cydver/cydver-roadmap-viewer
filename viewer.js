@@ -980,15 +980,19 @@ function renderChart() {
     monthBoundaries.add(next);
     return next;
   }, 0);
-  for (let w = 0; w <= weekCount(); w++) {
-    const line = addDiv(`grid-line v${monthBoundaries.has(w) ? " month" : ""}`, {
-      left: `${weekBoundaryX(w)}px`
-    });
-    line.style.height = monthBoundaries.has(w) ? "100%" : `${height - HEADER_H}px`;
-  }
+  if (isMobileTouchViewport()) {
+    addMobileVectorGrid(width, height, monthBoundaries);
+  } else {
+    for (let w = 0; w <= weekCount(); w++) {
+      const line = addDiv(`grid-line v${monthBoundaries.has(w) ? " month" : ""}`, {
+        left: `${weekBoundaryX(w)}px`
+      });
+      line.style.height = monthBoundaries.has(w) ? "100%" : `${height - HEADER_H}px`;
+    }
 
-  getTiers().forEach(tier => addDiv("grid-line h", { top: `${tierY(tier.id)}px` }));
-  addDiv("grid-line h", { top: `${height}px` });
+    getTiers().forEach(tier => addDiv("grid-line h", { top: `${tierY(tier.id)}px` }));
+    addDiv("grid-line h", { top: `${height}px` });
+  }
 
   getTiers().forEach(tier => {
     for (let lane = 1; lane <= visibleLaneCount(tier.id); lane++) {
@@ -2723,6 +2727,44 @@ function addDiv(className, style = {}) {
   Object.assign(el.style, style);
   els.roadmap.appendChild(el);
   return el;
+}
+
+function addMobileVectorGrid(width, height, monthBoundaries) {
+  const svgNs = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgNs, "svg");
+  svg.classList.add("grid-vector-layer");
+  svg.setAttribute("width", String(width));
+  svg.setAttribute("height", String(height));
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+
+  const addLine = (className, x1, y1, x2, y2) => {
+    const line = document.createElementNS(svgNs, "line");
+    line.setAttribute("class", className);
+    line.setAttribute("x1", String(x1));
+    line.setAttribute("y1", String(y1));
+    line.setAttribute("x2", String(x2));
+    line.setAttribute("y2", String(y2));
+    // Keep structural strokes in screen space while the roadmap is temporarily
+    // transformed during a pinch. This avoids per-line width rewrites in the
+    // gesture loop and removes the visible thick/thin snap at pinch commit.
+    line.setAttribute("vector-effect", "non-scaling-stroke");
+    svg.appendChild(line);
+  };
+
+  for (let w = 0; w <= weekCount(); w++) {
+    const month = monthBoundaries.has(w);
+    const x = weekBoundaryX(w);
+    addLine(`grid-vector-line v${month ? " month" : ""}`, x, month ? 0 : HEADER_H, x, height);
+  }
+  getTiers().forEach(tier => {
+    const y = tierY(tier.id);
+    addLine("grid-vector-line h", 0, y, width, y);
+  });
+  addLine("grid-vector-line h", 0, height, width, height);
+  els.roadmap.appendChild(svg);
 }
 
 function isMobileTouchViewport() {
