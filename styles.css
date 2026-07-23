@@ -3447,10 +3447,14 @@ body {
     animation: none;
   }
   /* The mobile card has fixed viewport geometry and owns its own scrolling. Keep
-     rapid Previous/Next content replacement from propagating layout/style work
-     back into the large roadmap page underneath the modal. */
+     rapid Previous/Next content replacement inside that surface, including paint.
+     The desktop shell uses a large blurred outer shadow; on iOS that creates an
+     oversized raster surface exactly while the roadmap may still be settling from
+     a pinch. The opaque modal veil already provides depth on touch devices, so use
+     a contained inset edge instead of repainting the 90px desktop shadow. */
   .unit-profile-card {
-    contain: layout style;
+    contain: layout paint style;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.045), inset 0 0 0 1px rgba(0,0,0,.16);
   }
   .unit-profile-overlay.closing {
     animation-duration: .08s;
