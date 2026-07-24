@@ -55,6 +55,8 @@ const META_BAR_EDGE_INSET = 6;
 const META_LABEL_MIN_RENDERED_HEIGHT = 9;
 const BAR_BOTTOM_PAD = 34;
 const MOBILE_CARD_SPATIAL_BUCKET_SIZE = 480;
+const MOBILE_META_DIMMER_OVERSCAN_PX = 96;
+const MOBILE_META_DIMMER_GUARD_PX = 32;
 
 const DEFAULT_STATE = {
   updated: "",
@@ -92,6 +94,12 @@ let metaOwnerTouchSelectionId = null;
 let metaOwnerProfileId = null;
 let metaOwnerHighlightedId = null;
 let metaFocusDimmerEl = null;
+let mobileMetaDimmerViewportWidth = 0;
+let mobileMetaDimmerViewportHeight = 0;
+let mobileMetaDimmerLeft = Number.NaN;
+let mobileMetaDimmerTop = Number.NaN;
+let mobileMetaDimmerWidth = Number.NaN;
+let mobileMetaDimmerHeight = Number.NaN;
 let tooltipEl = null;
 let tooltipPinned = false;
 let tooltipAnchorEl = null;
@@ -467,6 +475,14 @@ function bindControls() {
     setMetaOwnerTouchSelection(null);
   });
   els.chartScroll.addEventListener("wheel", handleWheelZoom, { passive: false });
+  if (isMobileTouchViewport()) {
+    // Capture the empty chart scrollport before the large roadmap is rendered.
+    // Later selection/profile taps can size the dimmer without a synchronous
+    // layout read on the interaction path.
+    mobileMetaDimmerViewportWidth = Math.max(1, Number(els.chartScroll.clientWidth) || Number(window.innerWidth) || 1);
+    mobileMetaDimmerViewportHeight = Math.max(1, Number(els.chartScroll.clientHeight) || Number(window.innerHeight) || 1);
+    els.chartScroll.addEventListener("scroll", syncActiveMobileMetaFocusDimmer, { passive: true });
+  }
 
   // The smooth pre-11754ed iPhone path lets WebKit own one-finger momentum scrolling
   // and consumes WebKit's native GestureEvent scale only for pinch. Keep the newer
@@ -533,6 +549,7 @@ function scheduleViewerViewportRefresh() {
     const previousZoom = zoomScale;
     zoomScale = clamp(zoomScale, minimumZoom(), MAX_ZOOM);
     applyZoomGeometry();
+    refreshMobileMetaFocusDimmerViewport();
 
     // Roadmap semantic presentation depends on roadmap zoom, not on Safari's
     // independently changing visual viewport. Browser chrome can emit resize
@@ -1028,6 +1045,7 @@ function renderChart() {
 
   metaFocusDimmerEl = addDiv("meta-focus-dimmer");
   metaFocusDimmerEl.setAttribute("aria-hidden", "true");
+  resetMobileMetaFocusDimmerSurface();
 
   state.units
     .filter(hasVisibleMetaSegments)
@@ -3357,6 +3375,10 @@ function maybeScheduleDeferredTouchZoomPresentation() {
     // Nothing in the post-gesture semantic pass may synchronously measure or
     // invalidate the giant roadmap. Tier/meta decisions are pure math and zoom-
     // dependent style is written to small local scopes across cancellable frames.
+    // Fit the already-active dimmer once after the gesture settles. Live pinch
+    // only expands/repositions it as coverage requires, avoiding per-frame surface
+    // churn while also preventing an oversized veil from surviving the gesture.
+    syncMobileMetaFocusDimmer();
     applyZoomSemanticVariables();
     updateAdaptiveTierLabels();
     scheduleMobileZoomStyleWork();
@@ -3397,6 +3419,7 @@ function applyZoom() {
   }
   touchZoomSemanticDirty = false;
   applyZoomGeometry();
+  syncMobileMetaFocusDimmer();
   applyZoomSemanticPresentation();
 }
 
@@ -3716,16 +3739,160 @@ function setMetaOwnerProfile(unitId) {
   if (isMobileTouchViewport() && unitProfileOverlay) return;
   updateMetaOwnerHighlight();
 }
+function resetMobileMetaFocusDimmerSurface() {
+  mobileMetaDimmerLeft = Number.NaN;
+  mobileMetaDimmerTop = Number.NaN;
+  mobileMetaDimmerWidth = Number.NaN;
+  mobileMetaDimmerHeight = Number.NaN;
+  if (!isMobileTouchViewport() || !metaFocusDimmerEl) return;
+  metaFocusDimmerEl.style.removeProperty("transform");
+  metaFocusDimmerEl.style.width = "0px";
+  metaFocusDimmerEl.style.height = "0px";
+}
+function mobileMetaFocusDimmerViewportSize(viewportWidth = 0, viewportHeight = 0) {
+  const suppliedWidth = Number(viewportWidth);
+  const suppliedHeight = Number(viewportHeight);
+  if (suppliedWidth > 0) mobileMetaDimmerViewportWidth = suppliedWidth;
+  if (suppliedHeight > 0) mobileMetaDimmerViewportHeight = suppliedHeight;
+  if (!(mobileMetaDimmerViewportWidth > 0)) {
+    mobileMetaDimmerViewportWidth = Math.max(
+      1,
+      Number(window.visualViewport?.width) || Number(window.innerWidth) || Number(els.chartScroll?.clientWidth) || 1
+    );
+  }
+  if (!(mobileMetaDimmerViewportHeight > 0)) {
+    mobileMetaDimmerViewportHeight = Math.max(
+      1,
+      Number(window.visualViewport?.height) || Number(window.innerHeight) || Number(els.chartScroll?.clientHeight) || 1
+    );
+  }
+}
+function refreshMobileMetaFocusDimmerViewport() {
+  if (!isMobileTouchViewport()) return;
+  mobileMetaDimmerViewportWidth = Math.max(1, Number(window.visualViewport?.width) || Number(window.innerWidth) || 1);
+  mobileMetaDimmerViewportHeight = Math.max(1, Number(window.visualViewport?.height) || Number(window.innerHeight) || 1);
+  syncMobileMetaFocusDimmer();
+}
+function syncMobileMetaFocusDimmer(
+  scale = zoomScale,
+  scrollLeft = null,
+  scrollTop = null,
+  viewportWidth = 0,
+  viewportHeight = 0,
+  allowInactive = false
+) {
+  if (!isMobileTouchViewport() || !metaFocusDimmerEl) return;
+  if (!allowInactive && !metaFocusDimmerEl.classList.contains("active")) return;
+
+  const safeScale = Math.max(0.001, Number(scale) || 1);
+  mobileMetaFocusDimmerViewportSize(viewportWidth, viewportHeight);
+  const cameraLeft = scrollLeft == null
+    ? Math.max(0, Number(els.chartScroll?.scrollLeft) || 0)
+    : Math.max(0, Number(scrollLeft) || 0);
+  const cameraTop = scrollTop == null
+    ? Math.max(0, Number(els.chartScroll?.scrollTop) || 0)
+    : Math.max(0, Number(scrollTop) || 0);
+  const contentRight = baseChartWidth();
+  const contentBottom = baseChartHeight();
+  const left = clamp((cameraLeft - MOBILE_META_DIMMER_OVERSCAN_PX) / safeScale, LEFT_W, contentRight);
+  const right = clamp(
+    (cameraLeft + mobileMetaDimmerViewportWidth + MOBILE_META_DIMMER_OVERSCAN_PX) / safeScale,
+    LEFT_W,
+    contentRight
+  );
+  const top = clamp((cameraTop - MOBILE_META_DIMMER_OVERSCAN_PX) / safeScale, HEADER_H, contentBottom);
+  const bottom = clamp(
+    (cameraTop + mobileMetaDimmerViewportHeight + MOBILE_META_DIMMER_OVERSCAN_PX) / safeScale,
+    HEADER_H,
+    contentBottom
+  );
+  const width = Math.max(0, right - left);
+  const height = Math.max(0, bottom - top);
+
+  if (
+    !Number.isFinite(mobileMetaDimmerLeft)
+    || !Number.isFinite(mobileMetaDimmerTop)
+    || Math.abs(left - mobileMetaDimmerLeft) > 0.01
+    || Math.abs(top - mobileMetaDimmerTop) > 0.01
+  ) {
+    metaFocusDimmerEl.style.transform = `translate3d(${left.toFixed(2)}px, ${top.toFixed(2)}px, 0)`;
+    mobileMetaDimmerLeft = left;
+    mobileMetaDimmerTop = top;
+  }
+  if (!Number.isFinite(mobileMetaDimmerWidth) || Math.abs(width - mobileMetaDimmerWidth) > 0.01) {
+    metaFocusDimmerEl.style.width = `${width.toFixed(2)}px`;
+    mobileMetaDimmerWidth = width;
+  }
+  if (!Number.isFinite(mobileMetaDimmerHeight) || Math.abs(height - mobileMetaDimmerHeight) > 0.01) {
+    metaFocusDimmerEl.style.height = `${height.toFixed(2)}px`;
+    mobileMetaDimmerHeight = height;
+  }
+}
+function mobileMetaFocusDimmerCovers(
+  scale = zoomScale,
+  scrollLeft = null,
+  scrollTop = null,
+  viewportWidth = 0,
+  viewportHeight = 0
+) {
+  if (
+    !Number.isFinite(mobileMetaDimmerLeft)
+    || !Number.isFinite(mobileMetaDimmerTop)
+    || !Number.isFinite(mobileMetaDimmerWidth)
+    || !Number.isFinite(mobileMetaDimmerHeight)
+  ) return false;
+
+  const safeScale = Math.max(0.001, Number(scale) || 1);
+  mobileMetaFocusDimmerViewportSize(viewportWidth, viewportHeight);
+  const cameraLeft = scrollLeft == null
+    ? Math.max(0, Number(els.chartScroll?.scrollLeft) || 0)
+    : Math.max(0, Number(scrollLeft) || 0);
+  const cameraTop = scrollTop == null
+    ? Math.max(0, Number(els.chartScroll?.scrollTop) || 0)
+    : Math.max(0, Number(scrollTop) || 0);
+  const contentRight = baseChartWidth();
+  const contentBottom = baseChartHeight();
+  const requiredLeft = clamp((cameraLeft - MOBILE_META_DIMMER_GUARD_PX) / safeScale, LEFT_W, contentRight);
+  const requiredRight = clamp(
+    (cameraLeft + mobileMetaDimmerViewportWidth + MOBILE_META_DIMMER_GUARD_PX) / safeScale,
+    LEFT_W,
+    contentRight
+  );
+  const requiredTop = clamp((cameraTop - MOBILE_META_DIMMER_GUARD_PX) / safeScale, HEADER_H, contentBottom);
+  const requiredBottom = clamp(
+    (cameraTop + mobileMetaDimmerViewportHeight + MOBILE_META_DIMMER_GUARD_PX) / safeScale,
+    HEADER_H,
+    contentBottom
+  );
+  return mobileMetaDimmerLeft <= requiredLeft + 0.02
+    && mobileMetaDimmerLeft + mobileMetaDimmerWidth >= requiredRight - 0.02
+    && mobileMetaDimmerTop <= requiredTop + 0.02
+    && mobileMetaDimmerTop + mobileMetaDimmerHeight >= requiredBottom - 0.02;
+}
+function ensureMobileMetaFocusDimmerCoverage(
+  scale = zoomScale,
+  scrollLeft = null,
+  scrollTop = null,
+  viewportWidth = 0,
+  viewportHeight = 0
+) {
+  if (!isMobileTouchViewport() || !metaFocusDimmerEl?.classList.contains("active")) return;
+  if (mobileMetaFocusDimmerCovers(scale, scrollLeft, scrollTop, viewportWidth, viewportHeight)) return;
+  syncMobileMetaFocusDimmer(scale, scrollLeft, scrollTop, viewportWidth, viewportHeight);
+}
+function syncActiveMobileMetaFocusDimmer() {
+  ensureMobileMetaFocusDimmerCoverage();
+}
 function suspendMetaOwnerHighlightForTouchProfile() {
   if (!isMobileTouchViewport() || !els.roadmap) return;
   // Full Profile already supplies its own viewport veil. Keeping the roadmap's
-  // ownership dimmer active underneath it leaves a second, roadmap-sized opacity
-  // surface alive for no visible benefit and makes profile open/nav/close compete
-  // with that large layer on iOS. Preserve all logical owner ids, but temporarily
+  // ownership dimmer active underneath it leaves a second translucent surface
+  // alive for no visible benefit. Preserve all logical owner ids, but temporarily
   // remove only the rendered ownership focus. closeUnitProfile() reconciles the
   // current logical touch selection once the modal is gone.
   if (metaOwnerHighlightedId) setMetaOwnerHighlightState(metaOwnerHighlightedId, false);
   metaFocusDimmerEl?.classList.remove("active");
+  resetMobileMetaFocusDimmerSurface();
   els.roadmap.classList.remove("meta-owner-context-active");
   metaOwnerHighlightedId = null;
 }
@@ -3800,12 +3967,14 @@ function updateMetaOwnerHighlight() {
   if (!els.roadmap) return;
   const activeId = metaOwnerProfileId || metaOwnerHoverId || metaOwnerFocusId || metaOwnerTouchSelectionId || null;
   if (activeId === metaOwnerHighlightedId) return;
+  if (activeId) syncMobileMetaFocusDimmer(zoomScale, null, null, 0, 0, true);
   if (metaOwnerHighlightedId) setMetaOwnerHighlightState(metaOwnerHighlightedId, false);
   if (activeId) setMetaOwnerHighlightState(activeId, true);
   // Use one timeline dimming overlay instead of restyling every unrelated mark.
   // The active owner's bars/links/tether/lane are elevated above it in CSS.
   // This restores strong focus+context while keeping hover work essentially O(1).
   metaFocusDimmerEl?.classList.toggle("active", !!activeId);
+  if (!activeId) resetMobileMetaFocusDimmerSurface();
   els.roadmap.classList.remove("meta-owner-context-active");
   metaOwnerHighlightedId = activeId;
 }
@@ -4911,6 +5080,13 @@ function applyPinchPreviewFrame(frame) {
     pinchGesture.viewportWidth,
     pinchGesture.viewportHeight
   );
+  ensureMobileMetaFocusDimmerCoverage(
+    nextZoom,
+    targetScrollLeft,
+    targetScrollTop,
+    pinchGesture.viewportWidth,
+    pinchGesture.viewportHeight
+  );
   els.chartStage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0) scale(${ratio})`;
   pinchGesture.finalZoom = nextZoom;
   pinchGesture.targetScrollLeft = targetScrollLeft;
@@ -5044,6 +5220,9 @@ function finishSettledWebKitPinchPresentation() {
     return;
   }
   els.chartScroll?.classList.remove("touch-gesturing");
+  // Collapse any temporary live-pinch oversizing once for the whole burst, in the
+  // same settled frame that already releases the retained stage geometry.
+  syncMobileMetaFocusDimmer();
   if (!touchZoomSemanticDirty || touchZoomSemanticPresentationBlocked()) return;
 
   // This is the same settled semantic work normally scheduled by the generic

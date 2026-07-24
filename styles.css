@@ -3439,10 +3439,17 @@ body {
     animation-duration: .14s;
   }
 
-  /* Preserve the exact desktop dimming result without treating the full-roadmap
-     veil as an animating opacity layer on mobile. Its translucent background is
-     unchanged; visibility only excludes the inactive surface from paint. */
+  /* Preserve the exact desktop dimming result with a viewport-bounded mobile
+     surface. JS positions this small veil over the scrollport (plus modest
+     overscan), so selected cards/bars/tethers keep the same z-order while WebKit
+     no longer allocates or discards a roadmap-sized translucent backing surface. */
   .meta-focus-dimmer {
+    left: 0;
+    top: 0;
+    right: auto;
+    bottom: auto;
+    width: 0;
+    height: 0;
     opacity: 1;
     visibility: hidden;
     transition: none;
