@@ -3442,7 +3442,10 @@ body {
   /* Preserve the exact desktop dimming result with a viewport-bounded mobile
      surface. JS positions this small veil over the scrollport (plus modest
      overscan), so selected cards/bars/tethers keep the same z-order while WebKit
-     no longer allocates or discards a roadmap-sized translucent backing surface. */
+     no longer allocates or discards a roadmap-sized translucent backing surface.
+     Keep the bounded layer geometry stable after first use and toggle only its
+     composited opacity; rebuilding its dimensions/visibility beside profile and
+     pinch layer changes can stall WebKit's layer transaction. */
   .meta-focus-dimmer {
     left: 0;
     top: 0;
@@ -3450,11 +3453,12 @@ body {
     bottom: auto;
     width: 0;
     height: 0;
-    opacity: 1;
-    visibility: hidden;
+    opacity: 0;
+    visibility: visible;
     transition: none;
+    will-change: transform, opacity;
   }
-  .meta-focus-dimmer.active { visibility: visible; }
+  .meta-focus-dimmer.active { opacity: 1; }
 
   /* Keep the close target spatially stable while a finger is trying to hit it.
      The full-card rise/scale animation moves this control during the first 220ms;

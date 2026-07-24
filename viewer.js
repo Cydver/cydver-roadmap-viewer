@@ -548,7 +548,16 @@ function scheduleViewerViewportRefresh() {
     viewportResizeFrame = 0;
     const previousZoom = zoomScale;
     zoomScale = clamp(zoomScale, minimumZoom(), MAX_ZOOM);
-    applyZoomGeometry();
+    const zoomChanged = Math.abs(previousZoom - zoomScale) >= 0.0001;
+
+    // Stage width/height and roadmap scale depend on roadmap zoom, not Safari's
+    // visual viewport. Browser-chrome expansion/collapse can emit resize events
+    // just after a pinch or momentum scroll; rewriting the same giant stage
+    // geometry there also clears the protected deferred-shrink state and can
+    // force a scroll-tree/layer transaction immediately before the next tap.
+    // Preserve the dormant transform-camera branch, whose bounds do depend on
+    // viewport size, but otherwise commit geometry only when zoom truly changed.
+    if (zoomChanged || useMobileTransformCamera()) applyZoomGeometry();
     refreshMobileMetaFocusDimmerViewport();
 
     // Roadmap semantic presentation depends on roadmap zoom, not on Safari's
@@ -557,7 +566,7 @@ function scheduleViewerViewportRefresh() {
     // semantic pass at an unchanged scale creates seconds of pointless rAF work.
     // Only reconcile semantics when the resize actually forced the zoom value to
     // change (for example if a future breakpoint changes the allowed minimum).
-    if (Math.abs(previousZoom - zoomScale) < 0.0001) {
+    if (!zoomChanged) {
       if (isMobileTouchViewport()) scheduleMobileViewportSemanticCatchup();
       return;
     }
@@ -3886,13 +3895,15 @@ function syncActiveMobileMetaFocusDimmer() {
 function suspendMetaOwnerHighlightForTouchProfile() {
   if (!isMobileTouchViewport() || !els.roadmap) return;
   // Full Profile already supplies its own viewport veil. Keeping the roadmap's
-  // ownership dimmer active underneath it leaves a second translucent surface
-  // alive for no visible benefit. Preserve all logical owner ids, but temporarily
-  // remove only the rendered ownership focus. closeUnitProfile() reconciles the
-  // current logical touch selection once the modal is gone.
+  // ownership dimmer visible underneath it leaves a second translucent surface
+  // for no visual benefit. Preserve all logical owner ids and the small bounded
+  // dimmer geometry, but temporarily remove only the rendered ownership focus.
+  // Keeping that geometry stable avoids tearing down and rebuilding a composited
+  // surface at the same moment the full-viewport profile layer is added/removed.
+  // closeUnitProfile() reconciles the current logical touch selection once the
+  // modal is gone.
   if (metaOwnerHighlightedId) setMetaOwnerHighlightState(metaOwnerHighlightedId, false);
   metaFocusDimmerEl?.classList.remove("active");
-  resetMobileMetaFocusDimmerSurface();
   els.roadmap.classList.remove("meta-owner-context-active");
   metaOwnerHighlightedId = null;
 }
@@ -3974,7 +3985,6 @@ function updateMetaOwnerHighlight() {
   // The active owner's bars/links/tether/lane are elevated above it in CSS.
   // This restores strong focus+context while keeping hover work essentially O(1).
   metaFocusDimmerEl?.classList.toggle("active", !!activeId);
-  if (!activeId) resetMobileMetaFocusDimmerSurface();
   els.roadmap.classList.remove("meta-owner-context-active");
   metaOwnerHighlightedId = activeId;
 }
