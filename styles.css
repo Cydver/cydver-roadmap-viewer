@@ -3439,13 +3439,15 @@ body {
     animation-duration: .14s;
   }
 
-  /* Keep ownership guidance on the selected card, bars, lane and tether, but do
-     not allocate the roadmap-sized opacity veil on mobile. On long timelines that
-     single surface can be far larger than the phone viewport and WebKit may have
-     to repaint/recomposite it after a pan or pinch just as Full Profile opens. */
+  /* Preserve the exact desktop dimming result without treating the full-roadmap
+     veil as an animating opacity layer on mobile. Its translucent background is
+     unchanged; visibility only excludes the inactive surface from paint. */
   .meta-focus-dimmer {
-    display: none;
+    opacity: 1;
+    visibility: hidden;
+    transition: none;
   }
+  .meta-focus-dimmer.active { visibility: visible; }
 
   /* Keep the close target spatially stable while a finger is trying to hit it.
      The full-card rise/scale animation moves this control during the first 220ms;

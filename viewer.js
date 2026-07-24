@@ -54,6 +54,7 @@ const META_LINK_OVERLAP = 3;
 const META_BAR_EDGE_INSET = 6;
 const META_LABEL_MIN_RENDERED_HEIGHT = 9;
 const BAR_BOTTOM_PAD = 34;
+const MOBILE_CARD_SPATIAL_BUCKET_SIZE = 480;
 
 const DEFAULT_STATE = {
   updated: "",
@@ -74,6 +75,7 @@ let pairedMsByPilotId = new Map();
 let pairedPilotByMsId = new Map();
 let profileTimelineCache = [];
 let profileTimelineIndexById = new Map();
+let maxRuntimeStackOrder = 0;
 let metaOwnerElementIndex = new Map();
 const profileImageWarmCache = new Map();
 let mobileCardNameMetricsById = new Map();
@@ -139,8 +141,13 @@ let mobileTextBoostTargetsCache = [];
 let mobileMetaLabelEntriesCache = [];
 let mobileTierLabelEntriesCache = [];
 let mobileCardEntriesCache = [];
+let mobileCardSpatialBuckets = new Map();
+let mobileCardSpatialMarginX = 0;
+let mobileCardSpatialMarginY = 0;
+let mobileSemanticRectCache = new WeakMap();
 let mobileGridVerticalCache = [];
 let mobileGridHorizontalCache = [];
+let mobileTouchMediaQuery = null;
 let unitProfileBindingGeneration = 0;
 let unitProfileBindingFrame = 0;
 const unitProfileBindingTimers = new Set();
@@ -2815,7 +2822,10 @@ function addMobileVectorGrid(width, height, monthBoundaries) {
 }
 
 function isMobileTouchViewport() {
-  return Boolean(window.matchMedia?.("(pointer: coarse)")?.matches);
+  if (!mobileTouchMediaQuery && typeof window.matchMedia === "function") {
+    mobileTouchMediaQuery = window.matchMedia("(pointer: coarse)");
+  }
+  return Boolean(mobileTouchMediaQuery?.matches);
 }
 function useMobileTransformCamera() {
   // The persistent whole-stage transform camera is intentionally disabled. Real
@@ -2979,29 +2989,74 @@ function mobileSemanticViewportRect(scale = zoomScale) {
     bottom: (scrollTop + viewportHeight + marginScreenPx) / safeScale
   };
 }
-function mobilePinchPreviewViewportRect(scale, scrollLeft, scrollTop) {
+function mobilePinchPreviewViewportRect(scale, scrollLeft, scrollTop, viewportWidth, viewportHeight) {
   const safeScale = Math.max(0.001, Number(scale) || 1);
-  const viewportWidth = Math.max(1, Number(window.visualViewport?.width) || Number(window.innerWidth) || 1);
-  const viewportHeight = Math.max(1, Number(window.visualViewport?.height) || Number(window.innerHeight) || 1);
+  const width = Math.max(1, Number(viewportWidth) || Number(window.visualViewport?.width) || Number(window.innerWidth) || 1);
+  const height = Math.max(1, Number(viewportHeight) || Number(window.visualViewport?.height) || Number(window.innerHeight) || 1);
   const marginScreenPx = 32;
   return {
     left: Math.max(0, (Math.max(0, Number(scrollLeft) || 0) - marginScreenPx) / safeScale),
-    right: (Math.max(0, Number(scrollLeft) || 0) + viewportWidth + marginScreenPx) / safeScale,
+    right: (Math.max(0, Number(scrollLeft) || 0) + width + marginScreenPx) / safeScale,
     top: Math.max(0, (Math.max(0, Number(scrollTop) || 0) - marginScreenPx) / safeScale),
-    bottom: (Math.max(0, Number(scrollTop) || 0) + viewportHeight + marginScreenPx) / safeScale
+    bottom: (Math.max(0, Number(scrollTop) || 0) + height + marginScreenPx) / safeScale
   };
 }
-function updateVisiblePinchCardDetailPreview(scale, scrollLeft, scrollTop) {
+function mobileCardSpatialBucketKey(bucketX, bucketY) {
+  return `${bucketX}:${bucketY}`;
+}
+function rebuildMobileCardSpatialIndex() {
+  mobileCardSpatialBuckets = new Map();
+  mobileCardSpatialMarginX = 0;
+  mobileCardSpatialMarginY = 0;
+  for (const entry of mobileCardEntriesCache) {
+    const rect = entry?.rect;
+    if (!rect) continue;
+    const halfWidth = Math.max(0.5, (rect.right - rect.left) / 2);
+    const halfHeight = Math.max(0.5, (rect.bottom - rect.top) / 2);
+    const centerX = rect.left + halfWidth;
+    const centerY = rect.top + halfHeight;
+    const bucketX = Math.floor(centerX / MOBILE_CARD_SPATIAL_BUCKET_SIZE);
+    const bucketY = Math.floor(centerY / MOBILE_CARD_SPATIAL_BUCKET_SIZE);
+    const key = mobileCardSpatialBucketKey(bucketX, bucketY);
+    if (!mobileCardSpatialBuckets.has(key)) mobileCardSpatialBuckets.set(key, []);
+    mobileCardSpatialBuckets.get(key).push(entry);
+    mobileCardSpatialMarginX = Math.max(mobileCardSpatialMarginX, halfWidth);
+    mobileCardSpatialMarginY = Math.max(mobileCardSpatialMarginY, halfHeight);
+  }
+}
+function forEachVisibleMobileCardEntry(viewport, callback) {
+  if (!viewport || typeof callback !== "function") return;
+  if (!mobileCardSpatialBuckets.size) {
+    for (const entry of mobileCardEntriesCache) {
+      if (mobileSemanticRectIntersects(entry?.rect, viewport)) callback(entry);
+    }
+    return;
+  }
+  const minBucketX = Math.floor((viewport.left - mobileCardSpatialMarginX) / MOBILE_CARD_SPATIAL_BUCKET_SIZE);
+  const maxBucketX = Math.floor((viewport.right + mobileCardSpatialMarginX) / MOBILE_CARD_SPATIAL_BUCKET_SIZE);
+  const minBucketY = Math.floor((viewport.top - mobileCardSpatialMarginY) / MOBILE_CARD_SPATIAL_BUCKET_SIZE);
+  const maxBucketY = Math.floor((viewport.bottom + mobileCardSpatialMarginY) / MOBILE_CARD_SPATIAL_BUCKET_SIZE);
+  for (let bucketY = minBucketY; bucketY <= maxBucketY; bucketY += 1) {
+    for (let bucketX = minBucketX; bucketX <= maxBucketX; bucketX += 1) {
+      const entries = mobileCardSpatialBuckets.get(mobileCardSpatialBucketKey(bucketX, bucketY));
+      if (!entries) continue;
+      for (const entry of entries) {
+        if (mobileSemanticRectIntersects(entry?.rect, viewport)) callback(entry);
+      }
+    }
+  }
+}
+function updateVisiblePinchCardDetailPreview(scale, scrollLeft, scrollTop, viewportWidth, viewportHeight) {
   if (!isMobileTouchViewport() || !mobileCardEntriesCache.length) return;
-  const viewport = mobilePinchPreviewViewportRect(scale, scrollLeft, scrollTop);
-  for (const { unit, card, rect } of mobileCardEntriesCache) {
-    if (!card?.isConnected || !mobileSemanticRectIntersects(rect, viewport)) continue;
+  const viewport = mobilePinchPreviewViewportRect(scale, scrollLeft, scrollTop, viewportWidth, viewportHeight);
+  forEachVisibleMobileCardEntry(viewport, ({ unit, card }) => {
+    if (!card?.isConnected) return;
     // This is deliberately limited to card density classes and only writes when
     // a threshold is crossed. Text boosts, meta labels, tier labels and stage
     // geometry retain the proven settled-zoom path, so live reveal does not
     // recreate the old per-frame whole-roadmap semantic pass.
     applyUnitCardDetailToCard(card, mobileUnitCardDetailState(unit, scale));
-  }
+  });
 }
 function mobileSemanticRectIntersects(rect, viewport) {
   return Boolean(rect && viewport
@@ -3012,6 +3067,8 @@ function mobileSemanticRectIntersects(rect, viewport) {
 }
 function mobileSemanticElementRect(element) {
   if (!element) return null;
+  const cached = mobileSemanticRectCache.get(element);
+  if (cached) return cached;
   const style = element.style;
   const number = value => {
     const parsed = Number.parseFloat(value);
@@ -3041,20 +3098,28 @@ function mobileSemanticElementRect(element) {
   } else if (element.classList.contains("meta-bar") || element.classList.contains("meta-link")) {
     height = BAR_H;
   } else if (element.classList.contains("meta-owner-node")) {
-    return { left: left - 16, right: left + 16, top: top - 16, bottom: top + 16 };
+    const rect = { left: left - 16, right: left + 16, top: top - 16, bottom: top + 16 };
+    mobileSemanticRectCache.set(element, rect);
+    return rect;
   } else if (element.classList.contains("meta-owner-tether")) {
     if (element.classList.contains("stem")) {
-      return { left: left - 12, right: left + 12, top, bottom: top + Math.max(1, height) };
+      const rect = { left: left - 12, right: left + 12, top, bottom: top + Math.max(1, height) };
+      mobileSemanticRectCache.set(element, rect);
+      return rect;
     }
-    return { left, right: left + Math.max(1, width), top: top - 12, bottom: top + 12 };
+    const rect = { left, right: left + Math.max(1, width), top: top - 12, bottom: top + 12 };
+    mobileSemanticRectCache.set(element, rect);
+    return rect;
   }
 
-  return {
+  const rect = {
     left,
     right: left + Math.max(1, width),
     top,
     bottom: top + Math.max(1, height)
   };
+  mobileSemanticRectCache.set(element, rect);
+  return rect;
 }
 function mobileSemanticElementVisible(element, viewport) {
   return mobileSemanticRectIntersects(mobileSemanticElementRect(element), viewport);
@@ -3176,14 +3241,14 @@ function scheduleMobileZoomStyleWork(scale = zoomScale) {
   });
 
   const cardEntries = [];
-  for (const { unit, card, rect } of mobileCardEntriesCache) {
-    if (!card?.isConnected || !mobileSemanticRectIntersects(rect, viewport)) continue;
+  forEachVisibleMobileCardEntry(viewport, ({ unit, card }) => {
+    if (!card?.isConnected) return;
     const detail = mobileUnitCardDetailState(unit, scale);
     const updateBoost = card.style.getPropertyValue("--textBoost") !== textBoost;
     const updateIconOnly = card.classList.contains("icon-only") !== Boolean(detail.iconOnly);
     const updateTagsOnly = card.classList.contains("tags-only") !== Boolean(detail.tagsOnly);
     if (updateBoost || updateIconOnly || updateTagsOnly) cardEntries.push({ card, detail, updateBoost });
-  }
+  });
 
   const metaEntries = [];
   for (const entry of mobileMetaLabelEntriesCache) {
@@ -3670,6 +3735,10 @@ function rebuildMobileStaticPresentationIndex() {
     mobileMetaLabelEntriesCache = [];
     mobileTierLabelEntriesCache = [];
     mobileCardEntriesCache = [];
+    mobileCardSpatialBuckets = new Map();
+    mobileCardSpatialMarginX = 0;
+    mobileCardSpatialMarginY = 0;
+    mobileSemanticRectCache = new WeakMap();
     mobileGridVerticalCache = [];
     mobileGridHorizontalCache = [];
     mobileCardNameMetricsById.clear();
@@ -3697,6 +3766,9 @@ function rebuildMobileStaticPresentationIndex() {
     card: liveUnitCardForId(unit.id),
     rect: iconRect(unit)
   })).filter(entry => entry.card);
+  rebuildMobileCardSpatialIndex();
+  mobileSemanticRectCache = new WeakMap();
+  for (const element of mobileTextBoostTargetsCache) mobileSemanticElementRect(element);
   mobileGridVerticalCache = Array.from(els.roadmap.querySelectorAll(".grid-line.v"));
   mobileGridHorizontalCache = Array.from(els.roadmap.querySelectorAll(".grid-line.h"));
   rebuildMobileCardPresentationMetrics();
@@ -4028,6 +4100,14 @@ function rectsOverlap(a, b) { return a.left < b.right && a.right > b.left && a.t
 function overlappingUnits(unit) {
   if (!unit) return [];
   const rect = iconRect(unit);
+  if (isMobileTouchViewport() && mobileCardSpatialBuckets.size) {
+    const overlaps = [];
+    forEachVisibleMobileCardEntry(rect, entry => {
+      const other = entry?.unit;
+      if (other?.id !== unit.id && rectsOverlap(rect, entry.rect)) overlaps.push(other);
+    });
+    return overlaps;
+  }
   return (state.units || []).filter(other => other.id !== unit.id && rectsOverlap(rect, iconRect(other)));
 }
 function bringUnitToFront(unitId, cardEl = null) {
@@ -4038,14 +4118,14 @@ function bringUnitToFront(unitId, cardEl = null) {
   const currentZ = unitZIndex(unit, sameSlotOffset(unit));
   const maxOverlapZ = Math.max(...overlaps.map(other => unitZIndex(other, sameSlotOffset(other))));
   if (currentZ > maxOverlapZ) return;
-  let maxOrder = Math.max(0, ...state.units.map(u => Number(u.stackOrder) || 0));
   let normalizedStackOrders = false;
-  if (maxOrder > 100000) {
+  if (maxRuntimeStackOrder > 100000) {
     state.units.slice().sort((a, b) => (Number(a.stackOrder) || 0) - (Number(b.stackOrder) || 0)).forEach((u, index) => { u.stackOrder = index; });
-    maxOrder = Math.max(0, ...state.units.map(u => Number(u.stackOrder) || 0));
+    maxRuntimeStackOrder = Math.max(0, state.units.length - 1);
     normalizedStackOrders = true;
   }
-  unit.stackOrder = maxOrder + 1;
+  maxRuntimeStackOrder += 1;
+  unit.stackOrder = maxRuntimeStackOrder;
   if (normalizedStackOrders) refreshUnitZIndices();
   else {
     const card = cardEl?.isConnected ? cardEl : els.roadmap?.querySelector?.(`.unit-card[data-id="${CSS.escape(unitId)}"]`);
@@ -4096,9 +4176,11 @@ function rebuildStaticRuntimeIndices() {
   unitByIdIndex = new Map();
   pairedMsByPilotId = new Map();
   pairedPilotByMsId = new Map();
+  maxRuntimeStackOrder = 0;
 
   for (const unit of units) {
     unitByIdIndex.set(unit.id, unit);
+    maxRuntimeStackOrder = Math.max(maxRuntimeStackOrder, Number(unit.stackOrder) || 0);
     if (isMs(unit)) {
       msUnits.push(unit);
       const week = normalizeWeek(unit.week);
@@ -4822,7 +4904,13 @@ function applyPinchPreviewFrame(frame) {
   const targetScrollTop = clamp(pinchGesture.anchorStageY * ratio - localY, 0, maxScrollTop);
   const translateX = pinchGesture.startScrollLeft - targetScrollLeft;
   const translateY = pinchGesture.startScrollTop - targetScrollTop;
-  updateVisiblePinchCardDetailPreview(nextZoom, targetScrollLeft, targetScrollTop);
+  updateVisiblePinchCardDetailPreview(
+    nextZoom,
+    targetScrollLeft,
+    targetScrollTop,
+    pinchGesture.viewportWidth,
+    pinchGesture.viewportHeight
+  );
   els.chartStage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0) scale(${ratio})`;
   pinchGesture.finalZoom = nextZoom;
   pinchGesture.targetScrollLeft = targetScrollLeft;
@@ -4971,11 +5059,13 @@ function scheduleWebKitPinchBurstSettle() {
   cancelWebKitPinchBurstSettle();
   webKitPinchBurstSettleTimer = setTimeout(() => {
     webKitPinchBurstSettleTimer = 0;
-    if (touchInteractionIsActive() || touchZoomSemanticPresentationBlocked()) {
-      // A profile/drawer/filter owns the viewport now. Rebuilding the hidden
-      // roadmap's scroll extent behind it can compete with modal paint and matches
-      // the intermittent delayed-tap path after fast zoom/pan chains.
+    if (touchInteractionIsActive()) {
       scheduleWebKitPinchBurstSettle();
+      return;
+    }
+    if (touchZoomSemanticPresentationBlocked()) {
+      // Leave the retained stage pending without repeatedly waking a timer behind
+      // the modal/filter. Its close path starts one fresh idle window.
       return;
     }
 
