@@ -138,6 +138,7 @@ let mobileViewportSemanticFrame = 0;
 let mobileTextBoostTargetsCache = [];
 let mobileMetaLabelEntriesCache = [];
 let mobileTierLabelEntriesCache = [];
+let mobileCardEntriesCache = [];
 let mobileGridVerticalCache = [];
 let mobileGridHorizontalCache = [];
 let unitProfileBindingGeneration = 0;
@@ -483,6 +484,13 @@ function bindControls() {
         else scheduleMobileViewportSemanticCatchup();
       });
     }
+    els.chartScroll.addEventListener("scroll", () => {
+      // A one-finger momentum pan can begin during the retained post-pinch window.
+      // Keep the expensive exact stage shrink behind the newest scroll activity
+      // instead of letting its timer rebuild the scroll tree mid-momentum.
+      if (!webKitPinchBurstSettleTimer && !mobileStageShrinkPending) return;
+      scheduleWebKitPinchBurstSettle();
+    }, { passive: true });
   }
 
   els.chartScroll.addEventListener("pointerdown", beginTouchGesture);
@@ -1415,7 +1423,7 @@ function openPullCalculator() {
 function closePullCalculator() {
   els.pullCalculator?.classList.add("hidden");
   document.getElementById("btnOpenPullCalculator")?.setAttribute("aria-expanded", "false");
-  maybeScheduleDeferredTouchZoomPresentation();
+  resumeDeferredMobilePresentation();
 }
 
 function resetPullCalculator() {
@@ -2582,7 +2590,7 @@ function closeUnitProfile(immediate = false) {
     // then let the underlying hover/focus state take over without a one-frame flash.
     requestAnimationFrame(() => {
       if (!unitProfileOverlay && metaOwnerProfileId === closingProfileOwnerId) setMetaOwnerProfile(null);
-      if (!unitProfileOverlay) maybeScheduleDeferredTouchZoomPresentation();
+      if (!unitProfileOverlay) resumeDeferredMobilePresentation();
     });
   };
 
@@ -2971,6 +2979,30 @@ function mobileSemanticViewportRect(scale = zoomScale) {
     bottom: (scrollTop + viewportHeight + marginScreenPx) / safeScale
   };
 }
+function mobilePinchPreviewViewportRect(scale, scrollLeft, scrollTop) {
+  const safeScale = Math.max(0.001, Number(scale) || 1);
+  const viewportWidth = Math.max(1, Number(window.visualViewport?.width) || Number(window.innerWidth) || 1);
+  const viewportHeight = Math.max(1, Number(window.visualViewport?.height) || Number(window.innerHeight) || 1);
+  const marginScreenPx = 32;
+  return {
+    left: Math.max(0, (Math.max(0, Number(scrollLeft) || 0) - marginScreenPx) / safeScale),
+    right: (Math.max(0, Number(scrollLeft) || 0) + viewportWidth + marginScreenPx) / safeScale,
+    top: Math.max(0, (Math.max(0, Number(scrollTop) || 0) - marginScreenPx) / safeScale),
+    bottom: (Math.max(0, Number(scrollTop) || 0) + viewportHeight + marginScreenPx) / safeScale
+  };
+}
+function updateVisiblePinchCardDetailPreview(scale, scrollLeft, scrollTop) {
+  if (!isMobileTouchViewport() || !mobileCardEntriesCache.length) return;
+  const viewport = mobilePinchPreviewViewportRect(scale, scrollLeft, scrollTop);
+  for (const { unit, card, rect } of mobileCardEntriesCache) {
+    if (!card?.isConnected || !mobileSemanticRectIntersects(rect, viewport)) continue;
+    // This is deliberately limited to card density classes and only writes when
+    // a threshold is crossed. Text boosts, meta labels, tier labels and stage
+    // geometry retain the proven settled-zoom path, so live reveal does not
+    // recreate the old per-frame whole-roadmap semantic pass.
+    applyUnitCardDetailToCard(card, mobileUnitCardDetailState(unit, scale));
+  }
+}
 function mobileSemanticRectIntersects(rect, viewport) {
   return Boolean(rect && viewport
     && rect.right >= viewport.left
@@ -3076,8 +3108,7 @@ function processMobileZoomStyleFrame() {
       const { card, detail, updateBoost } = entry;
       if (!card?.isConnected) continue;
       if (updateBoost) card.style.setProperty("--textBoost", job.textBoost);
-      card.classList.toggle("icon-only", Boolean(detail.iconOnly));
-      card.classList.toggle("tags-only", Boolean(detail.tagsOnly));
+      applyUnitCardDetailToCard(card, detail);
     }
     if (job.cardIndex < job.cardEntries.length) {
       scheduleMobileZoomStyleSlice();
@@ -3145,9 +3176,8 @@ function scheduleMobileZoomStyleWork(scale = zoomScale) {
   });
 
   const cardEntries = [];
-  for (const unit of state.units || []) {
-    const card = liveUnitCardForId(unit.id);
-    if (!card?.isConnected || !mobileSemanticRectIntersects(iconRect(unit), viewport)) continue;
+  for (const { unit, card, rect } of mobileCardEntriesCache) {
+    if (!card?.isConnected || !mobileSemanticRectIntersects(rect, viewport)) continue;
     const detail = mobileUnitCardDetailState(unit, scale);
     const updateBoost = card.style.getPropertyValue("--textBoost") !== textBoost;
     const updateIconOnly = card.classList.contains("icon-only") !== Boolean(detail.iconOnly);
@@ -3267,6 +3297,28 @@ function maybeScheduleDeferredTouchZoomPresentation() {
     scheduleMobileZoomStyleWork();
     touchZoomSemanticDirty = false;
   }, TOUCH_ZOOM_SEMANTIC_SETTLE_MS);
+}
+function hasPendingWebKitPinchPresentation() {
+  return Boolean(
+    useWebKitNativeGestureInput
+    && (
+      webKitPinchBurstSettleTimer
+      || webKitPinchBurstSettleFrame
+      || mobileStageShrinkPending
+      || touchZoomSemanticDirty
+      || els.chartScroll?.classList.contains("touch-gesturing")
+    )
+  );
+}
+function resumeDeferredMobilePresentation() {
+  if (hasPendingWebKitPinchPresentation()) {
+    // Start a fresh idle window after a modal/filter surface releases the chart.
+    // This prevents the retained stage from shrinking in the same frame as the
+    // newly exposed roadmap has to paint.
+    scheduleWebKitPinchBurstSettle();
+    return;
+  }
+  maybeScheduleDeferredTouchZoomPresentation();
 }
 function markTouchZoomSemanticDirty() {
   touchZoomSemanticDirty = true;
@@ -3617,6 +3669,7 @@ function rebuildMobileStaticPresentationIndex() {
     mobileTextBoostTargetsCache = [];
     mobileMetaLabelEntriesCache = [];
     mobileTierLabelEntriesCache = [];
+    mobileCardEntriesCache = [];
     mobileGridVerticalCache = [];
     mobileGridHorizontalCache = [];
     mobileCardNameMetricsById.clear();
@@ -3639,6 +3692,11 @@ function rebuildMobileStaticPresentationIndex() {
     label,
     text: label.querySelector(".tier-label-text")
   })).filter(entry => entry.text);
+  mobileCardEntriesCache = (state.units || []).map(unit => ({
+    unit,
+    card: liveUnitCardForId(unit.id),
+    rect: iconRect(unit)
+  })).filter(entry => entry.card);
   mobileGridVerticalCache = Array.from(els.roadmap.querySelectorAll(".grid-line.v"));
   mobileGridHorizontalCache = Array.from(els.roadmap.querySelectorAll(".grid-line.h"));
   rebuildMobileCardPresentationMetrics();
@@ -4454,11 +4512,24 @@ function mobileUnitCardDetailState(unit, scale = zoomScale) {
 function liveUnitCardForId(unitId) {
   return (metaOwnerElementIndex.get(unitId) || []).find(element => element.classList?.contains("unit-card") && element.dataset.id === unitId) || null;
 }
+function unitCardDetailKey(detail) {
+  if (detail?.iconOnly) return "icon";
+  if (detail?.tagsOnly) return "tags";
+  return "full";
+}
+function applyUnitCardDetailToCard(card, detail) {
+  if (!card || !detail) return false;
+  const detailKey = unitCardDetailKey(detail);
+  const iconOnly = detailKey === "icon";
+  const tagsOnly = detailKey === "tags";
+  if (card.classList.contains("icon-only") === iconOnly && card.classList.contains("tags-only") === tagsOnly) return false;
+  card.classList.toggle("icon-only", iconOnly);
+  card.classList.toggle("tags-only", tagsOnly);
+  return true;
+}
 function applyUnitCardDetailState(unitId, detail) {
   const card = liveUnitCardForId(unitId);
-  if (!card || !detail) return;
-  card.classList.toggle("icon-only", Boolean(detail.iconOnly));
-  card.classList.toggle("tags-only", Boolean(detail.tagsOnly));
+  applyUnitCardDetailToCard(card, detail);
 }
 function applyUnitCardDetailStates(states) {
   if (!states) return;
@@ -4596,6 +4667,7 @@ function saveCustomUnitFilter() {
   saveViewerLocalState();
   applyMetaFilters();
   updateCustomUnitFilterControls();
+  resumeDeferredMobilePresentation();
 }
 function cancelCustomUnitFilterMode() {
   if (!customUnitFilterEditing) return;
@@ -4604,6 +4676,7 @@ function cancelCustomUnitFilterMode() {
   els.roadmap?.classList.remove("custom-unit-filter-editing");
   applyMetaFilters();
   updateCustomUnitFilterControls();
+  resumeDeferredMobilePresentation();
 }
 function clearCustomUnitFilterDraft() {
   if (!customUnitFilterEditing) return;
@@ -4749,6 +4822,7 @@ function applyPinchPreviewFrame(frame) {
   const targetScrollTop = clamp(pinchGesture.anchorStageY * ratio - localY, 0, maxScrollTop);
   const translateX = pinchGesture.startScrollLeft - targetScrollLeft;
   const translateY = pinchGesture.startScrollTop - targetScrollTop;
+  updateVisiblePinchCardDetailPreview(nextZoom, targetScrollLeft, targetScrollTop);
   els.chartStage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0) scale(${ratio})`;
   pinchGesture.finalZoom = nextZoom;
   pinchGesture.targetScrollLeft = targetScrollLeft;
@@ -4857,6 +4931,11 @@ function settleDeferredMobileStageGeometry() {
   if (!mobileStageShrinkPending || useMobileTransformCamera()) return;
   const width = baseChartWidth();
   const height = baseChartHeight();
+  // Read the unchanged viewport before invalidating stage geometry. Reading
+  // clientWidth/clientHeight after the large width/height writes forced WebKit to
+  // synchronously flush layout in the exact pinch-end path this deferral protects.
+  const viewportWidth = els.chartScroll.clientWidth;
+  const viewportHeight = els.chartScroll.clientHeight;
   els.chartStage.style.width = `${width * zoomScale}px`;
   els.chartStage.style.height = `${height * zoomScale}px`;
   mobileStageGeometryScale = zoomScale;
@@ -4865,8 +4944,8 @@ function settleDeferredMobileStageGeometry() {
 
   // The stage may have deliberately kept a larger scroll extent throughout a
   // rapid zoom-out burst. Clamp only once when that retained extent is released.
-  const maxScrollLeft = Math.max(0, width * zoomScale - els.chartScroll.clientWidth);
-  const maxScrollTop = Math.max(0, height * zoomScale - els.chartScroll.clientHeight);
+  const maxScrollLeft = Math.max(0, width * zoomScale - viewportWidth);
+  const maxScrollTop = Math.max(0, height * zoomScale - viewportHeight);
   if (els.chartScroll.scrollLeft > maxScrollLeft) els.chartScroll.scrollLeft = maxScrollLeft;
   if (els.chartScroll.scrollTop > maxScrollTop) els.chartScroll.scrollTop = maxScrollTop;
 }
@@ -4892,13 +4971,10 @@ function scheduleWebKitPinchBurstSettle() {
   cancelWebKitPinchBurstSettle();
   webKitPinchBurstSettleTimer = setTimeout(() => {
     webKitPinchBurstSettleTimer = 0;
-    // A Full Profile/Pull Calculator/Note Reader tap can land inside this settle
-    // window without itself being a "touch interaction" by the check above (it is
-    // a single completed tap, not an in-progress gesture). Reschedule instead of
-    // shrinking the giant chart stage while that presentation is up or closing, so
-    // the deferred stage-shrink/scroll-clamp below can never coincide with opening,
-    // navigating, or closing those overlays.
     if (touchInteractionIsActive() || touchZoomSemanticPresentationBlocked()) {
+      // A profile/drawer/filter owns the viewport now. Rebuilding the hidden
+      // roadmap's scroll extent behind it can compete with modal paint and matches
+      // the intermittent delayed-tap path after fast zoom/pan chains.
       scheduleWebKitPinchBurstSettle();
       return;
     }

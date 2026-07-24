@@ -3439,12 +3439,12 @@ body {
     animation-duration: .14s;
   }
 
-  /* Touch ownership uses a roadmap-sized dimmer. Do not animate that surface on
-     iOS: opacity transitions can promote a very large backing layer even though
-     the visual change is only a brief focus cue. The selected owner still changes
-     immediately and Full Profile keeps its own independent viewport veil. */
+  /* Keep ownership guidance on the selected card, bars, lane and tether, but do
+     not allocate the roadmap-sized opacity veil on mobile. On long timelines that
+     single surface can be far larger than the phone viewport and WebKit may have
+     to repaint/recomposite it after a pan or pinch just as Full Profile opens. */
   .meta-focus-dimmer {
-    transition: none;
+    display: none;
   }
 
   /* Keep the close target spatially stable while a finger is trying to hit it.
