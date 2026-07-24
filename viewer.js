@@ -4892,7 +4892,13 @@ function scheduleWebKitPinchBurstSettle() {
   cancelWebKitPinchBurstSettle();
   webKitPinchBurstSettleTimer = setTimeout(() => {
     webKitPinchBurstSettleTimer = 0;
-    if (touchInteractionIsActive()) {
+    // A Full Profile/Pull Calculator/Note Reader tap can land inside this settle
+    // window without itself being a "touch interaction" by the check above (it is
+    // a single completed tap, not an in-progress gesture). Reschedule instead of
+    // shrinking the giant chart stage while that presentation is up or closing, so
+    // the deferred stage-shrink/scroll-clamp below can never coincide with opening,
+    // navigating, or closing those overlays.
+    if (touchInteractionIsActive() || touchZoomSemanticPresentationBlocked()) {
       scheduleWebKitPinchBurstSettle();
       return;
     }
