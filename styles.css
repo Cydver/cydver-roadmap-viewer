@@ -615,7 +615,6 @@ h1 {
 .chart-scroll {
   cursor: grab;
   overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
   touch-action: pan-x pan-y;
 }
 .chart-scroll.panning,
@@ -3423,10 +3422,12 @@ body {
 @media (pointer: coarse) {
   /* On WebKit/iOS, GestureEvent gives us the native pinch scale independently of
      the pointer stream. Keep one-finger movement on the browser's momentum-scroll
-     path and reserve custom handling for the pinch itself. */
+     path and reserve custom handling for the pinch itself. Current Safari already
+     accelerates overflow scrolling; the legacy -webkit-overflow-scrolling opt-in
+     needlessly creates another scrolling-layer boundary when the map first grows
+     beyond the scrollport. */
   .chart-scroll.webkit-native-gesture-input {
     touch-action: pan-x pan-y;
-    -webkit-overflow-scrolling: touch;
   }
 
   /* Backdrop filtering a full phone viewport forces extra compositing work exactly
@@ -4147,16 +4148,15 @@ body {
     overflow: hidden;
     touch-action: none;
     overscroll-behavior: none;
-    -webkit-overflow-scrolling: auto;
     scrollbar-width: none;
   }
   /* Restore the proven pre-11754ed iPhone navigation owner only when JS has
      positively detected WebKit's native GestureEvent stream. The fallback remains
-     the current app-owned Pointer Events path. */
+     the current app-owned Pointer Events path. Native momentum scrolling does not
+     require the legacy -webkit-overflow-scrolling property on supported Safari. */
   .chart-scroll.webkit-native-gesture-input {
     overflow: auto;
     touch-action: pan-x pan-y;
-    -webkit-overflow-scrolling: touch;
   }
   .chart-scroll::-webkit-scrollbar,
   .chart-scroll.webkit-native-gesture-input::-webkit-scrollbar {
