@@ -1809,13 +1809,6 @@ function tooltipOwnerObstacleRects(anchorEl) {
     return { rect, weight };
   }).filter(item => item.rect.width > 0 && item.rect.height > 0);
 }
-function tooltipOwnerMetaBarRects(anchorEl) {
-  if (!anchorEl?.classList?.contains("unit-card") || !els.roadmap?.contains(anchorEl)) return [];
-  const ownerId = tooltipOwnerId(anchorEl);
-  if (!ownerId) return [];
-  const id = CSS.escape(ownerId);
-  return Array.from(els.roadmap.querySelectorAll(`.meta-bar[data-unit-id="${id}"]`)).map(node => node.getBoundingClientRect()).filter(rect => rect.width > 0 && rect.height > 0);
-}
 function viewportSafeAreaInsets() {
   if (!safeAreaProbeEl?.isConnected) {
     safeAreaProbeEl = document.createElement("div");
@@ -1854,7 +1847,6 @@ function positionSmartTooltip(element, event, anchorEl = null, maxWidth = 360) {
   const anchorRect = reference?.getBoundingClientRect() || { left: clientX, right: clientX, top: clientY, bottom: clientY, width: 0, height: 0 };
   const order = tooltipPlacementOrder(reference, anchorRect);
   const ownerObstacles = tooltipOwnerObstacleRects(reference);
-  const ownerMetaBars = tooltipOwnerMetaBarRects(reference);
   const maxLeft = Math.max(safeLeft, safeRight - tooltipRect.width);
   const maxTop = Math.max(safeTop, safeBottom - tooltipRect.height);
   const candidates = order.map((placement, preferenceIndex) => {
@@ -1874,51 +1866,10 @@ function positionSmartTooltip(element, event, anchorEl = null, maxWidth = 360) {
       const area = tooltipIntersectionArea(candidateRect, obstacle.rect);
       if (area) score += obstacle.weight * (1800 + area);
     }
-    return { left, top, placement, score, rect: candidateRect };
+    return { left, top, placement, score };
   });
   candidates.sort((a, b) => a.score - b.score);
-  let best = candidates[0];
-
-  // Preserve the original smart-placement result everywhere except the one
-  // roadmap-specific failure case: a unit-card tooltip chosen on the right
-  // while actually covering that unit's rightward meta bar. Keep the tooltip
-  // on the same local side and shift it vertically just enough to clear the
-  // owner's meta bar. If that cannot be done without covering the trigger or
-  // leaving the viewport, keep the original result rather than introducing a
-  // worse fallback that obscures the hovered card/cursor.
-  if (best?.placement === "right" && ownerMetaBars.some(rect => tooltipIntersectionArea(best.rect, rect) > 0)) {
-    const horizontallyRelevantMetaBars = ownerMetaBars.filter(rect =>
-      Math.min(best.rect.right, rect.right) > Math.max(best.rect.left, rect.left)
-    );
-    if (horizontallyRelevantMetaBars.length) {
-      const metaGap = 10;
-      const highestMetaTop = Math.min(...horizontallyRelevantMetaBars.map(rect => rect.top));
-      const lowestMetaBottom = Math.max(...horizontallyRelevantMetaBars.map(rect => rect.bottom));
-      const shiftedTops = [
-        highestMetaTop - metaGap - tooltipRect.height,
-        lowestMetaBottom + metaGap
-      ];
-      const shiftedCandidates = shiftedTops.map(top => {
-        if (top < safeTop || top > maxTop) return null;
-        const rect = { left: best.left, top, right: best.left + tooltipRect.width, bottom: top + tooltipRect.height };
-        if (tooltipIntersectionArea(rect, anchorRect) > 0) return null;
-        if (ownerMetaBars.some(metaRect => tooltipIntersectionArea(rect, metaRect) > 0)) return null;
-        const obstacleOverlap = ownerObstacles.reduce((sum, obstacle) =>
-          sum + tooltipIntersectionArea(rect, obstacle.rect) * obstacle.weight, 0
-        );
-        return {
-          left: best.left,
-          top,
-          placement: "right",
-          rect,
-          score: best.score + Math.abs(top - best.top) * 18 + obstacleOverlap
-        };
-      }).filter(Boolean);
-      shiftedCandidates.sort((a, b) => a.score - b.score);
-      if (shiftedCandidates[0]) best = shiftedCandidates[0];
-    }
-  }
-
+  const best = candidates[0];
   element.dataset.placement = best.placement;
   element.style.left = `${Math.round(best.left)}px`;
   element.style.top = `${Math.round(best.top)}px`;
