@@ -4874,3 +4874,58 @@ body {
     min-height: 0;
   }
 }
+
+/* --- Native WebKit header text isolation ---
+   Safari's CSS zoom path is the smooth pinch renderer, but WebKit still has
+   discontinuous text/line-height behavior while CSS zoom changes. Keep the
+   existing header boxes/backgrounds inside the zoomed roadmap and render only
+   their glyphs on two narrow transform-scaled surfaces outside that subtree. */
+@media (pointer: coarse) {
+  .chart-scroll.webkit-css-zoom-pinch .roadmap > .month-head > .roadmap-header-text,
+  .chart-scroll.webkit-css-zoom-pinch .roadmap > .week-head > .roadmap-header-text,
+  .chart-scroll.webkit-css-zoom-pinch .roadmap > .tier-label > .tier-label-text {
+    display: none;
+  }
+
+  .webkit-header-text-overlay {
+    position: absolute;
+    left: 0;
+    top: 0;
+    pointer-events: none;
+    overflow: visible;
+    z-index: 40;
+  }
+  .webkit-header-text-layer {
+    position: absolute;
+    left: 0;
+    top: 0;
+    transform-origin: 0 0;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  .webkit-header-text-layer-top {
+    height: var(--header-h);
+  }
+  .webkit-header-text-layer-left {
+    width: var(--left);
+  }
+  .webkit-header-text-clone {
+    pointer-events: none;
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+  }
+  .webkit-header-text-layer-top .month-head {
+    color: #eff5ff;
+  }
+  .webkit-header-text-layer-top .week-head {
+    color: #b6c3d4;
+  }
+  .webkit-header-text-layer-left .tier-label {
+    background: transparent !important;
+    border-right: 0 !important;
+  }
+  .webkit-header-text-layer-left .tier-label::before {
+    display: none;
+  }
+}

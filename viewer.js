@@ -342,6 +342,9 @@ const els = {
   pullCalcPilotBreakdown: document.getElementById("btnPullCalcPilotBreakdown")
 };
 
+let webKitHeaderTopLayer = null;
+let webKitHeaderLeftLayer = null;
+
 document.addEventListener("DOMContentLoaded", init);
 
 async function init() {
@@ -977,6 +980,18 @@ function renderLegend() {
   });
 }
 
+function setRoadmapHeaderText(element, text) {
+  if (!element) return;
+  if (!useWebKitCssZoomRendering) {
+    element.textContent = text;
+    return;
+  }
+  const span = document.createElement("span");
+  span.className = "roadmap-header-text";
+  span.textContent = text;
+  element.appendChild(span);
+}
+
 function renderChart() {
   mobileCardNameMetricsById.clear();
   captureRoadmapImagesForRender();
@@ -994,12 +1009,12 @@ function renderChart() {
       left: `${weekX(monthStartWeek(i))}px`,
       width: `${monthPixelWidth(i)}px`
     });
-    el.textContent = month;
+    setRoadmapHeaderText(el, month);
   });
 
   for (let w = 1; w <= weekCount(); w++) {
     const el = addDiv("week-head", { left: `${weekX(w)}px`, width: `${weekWidth(w)}px` });
-    el.textContent = `W${weekToMonthWeek(w).weekInMonth}`;
+    setRoadmapHeaderText(el, `W${weekToMonthWeek(w).weekInMonth}`);
   }
 
   getTiers().forEach(tier => {
@@ -1080,6 +1095,7 @@ function renderChart() {
   // Filtering is semantic state, not zoom presentation. Apply it when markup is
   // rebuilt instead of rescanning the whole roadmap at every zoom commit.
   applyMetaFilters();
+  rebuildWebKitHeaderTextOverlay();
 }
 
 function renderUnit(unit) {
@@ -2906,6 +2922,97 @@ function handleWheelZoom(event) {
   setZoomAtClientPoint(zoomScale * factor, event.clientX, event.clientY);
 }
 
+function ensureWebKitHeaderTextOverlay() {
+  if (!useWebKitCssZoomRendering || !els.chartStage) return null;
+  let root = els.chartStage.querySelector(".webkit-header-text-overlay");
+  if (!root) {
+    root = document.createElement("div");
+    root.className = "webkit-header-text-overlay";
+    root.setAttribute("aria-hidden", "true");
+
+    webKitHeaderTopLayer = document.createElement("div");
+    webKitHeaderTopLayer.className = "webkit-header-text-layer webkit-header-text-layer-top";
+    root.appendChild(webKitHeaderTopLayer);
+
+    webKitHeaderLeftLayer = document.createElement("div");
+    webKitHeaderLeftLayer.className = "webkit-header-text-layer webkit-header-text-layer-left";
+    root.appendChild(webKitHeaderLeftLayer);
+
+    els.chartStage.appendChild(root);
+  } else {
+    webKitHeaderTopLayer = root.querySelector(".webkit-header-text-layer-top");
+    webKitHeaderLeftLayer = root.querySelector(".webkit-header-text-layer-left");
+  }
+  return root;
+}
+
+function applyWebKitHeaderTextOverlayScale(scale = zoomScale) {
+  if (!useWebKitCssZoomRendering) return;
+  if (!webKitHeaderTopLayer || !webKitHeaderLeftLayer) ensureWebKitHeaderTextOverlay();
+  if (!webKitHeaderTopLayer || !webKitHeaderLeftLayer) return;
+  const safeScale = Math.max(0.001, Number(scale) || zoomScale || 1);
+  const transform = `scale(${safeScale})`;
+  if (webKitHeaderTopLayer.style.transform !== transform) webKitHeaderTopLayer.style.transform = transform;
+  if (webKitHeaderLeftLayer.style.transform !== transform) webKitHeaderLeftLayer.style.transform = transform;
+}
+
+function applyWebKitHeaderTextOverlayTypography(scale = zoomScale) {
+  if (!useWebKitCssZoomRendering) return;
+  if (!webKitHeaderTopLayer || !webKitHeaderLeftLayer) ensureWebKitHeaderTextOverlay();
+  if (!webKitHeaderTopLayer || !webKitHeaderLeftLayer) return;
+  const boost = legibleTextScale(scale).toFixed(3);
+  webKitHeaderTopLayer.style.setProperty("--headerTextBoost", boost);
+  webKitHeaderLeftLayer.style.setProperty("--headerTextBoost", boost);
+}
+
+function syncWebKitHeaderTierText() {
+  if (!useWebKitCssZoomRendering || !webKitHeaderLeftLayer) return;
+  const byTier = new Map(
+    Array.from(els.roadmap.querySelectorAll(".tier-label[data-tier-id]")).map(label => [label.dataset.tierId, label])
+  );
+  for (const clone of webKitHeaderLeftLayer.querySelectorAll(".tier-label[data-tier-id]")) {
+    const source = byTier.get(clone.dataset.tierId);
+    if (!source) continue;
+    const sourceText = source.querySelector(".tier-label-text");
+    const cloneText = clone.querySelector(".tier-label-text");
+    if (sourceText && cloneText && cloneText.textContent !== sourceText.textContent) cloneText.textContent = sourceText.textContent;
+    const abbreviated = source.dataset.abbreviated === "true";
+    clone.dataset.abbreviated = abbreviated ? "true" : "false";
+  }
+}
+
+function rebuildWebKitHeaderTextOverlay() {
+  if (!useWebKitCssZoomRendering) return;
+  ensureWebKitHeaderTextOverlay();
+  if (!webKitHeaderTopLayer || !webKitHeaderLeftLayer) return;
+
+  webKitHeaderTopLayer.replaceChildren();
+  webKitHeaderLeftLayer.replaceChildren();
+  webKitHeaderTopLayer.style.width = `${baseChartWidth()}px`;
+  webKitHeaderTopLayer.style.height = `${HEADER_H}px`;
+  webKitHeaderLeftLayer.style.width = `${LEFT_W}px`;
+  webKitHeaderLeftLayer.style.height = `${baseChartHeight()}px`;
+
+  for (const source of els.roadmap.querySelectorAll(".month-head:not(.corner), .week-head")) {
+    const clone = source.cloneNode(true);
+    clone.classList.add("webkit-header-text-clone");
+    clone.removeAttribute("id");
+    webKitHeaderTopLayer.appendChild(clone);
+  }
+  for (const source of els.roadmap.querySelectorAll(".tier-label")) {
+    const clone = source.cloneNode(true);
+    clone.classList.add("webkit-header-text-clone");
+    clone.removeAttribute("id");
+    clone.removeAttribute("tabindex");
+    clone.removeAttribute("aria-label");
+    webKitHeaderLeftLayer.appendChild(clone);
+  }
+
+  applyWebKitHeaderTextOverlayTypography(zoomScale);
+  applyWebKitHeaderTextOverlayScale(zoomScale);
+  syncWebKitHeaderTierText();
+}
+
 function applyZoomGeometry() {
   const width = baseChartWidth();
   const height = baseChartHeight();
@@ -2928,6 +3035,7 @@ function applyZoomGeometry() {
     els.chartStage.style.transform = "";
     els.roadmap.style.transform = "";
     els.roadmap.style.zoom = String(zoomScale);
+    applyWebKitHeaderTextOverlayScale(zoomScale);
     els.chartStage.style.width = `${width * zoomScale}px`;
     els.chartStage.style.height = `${height * zoomScale}px`;
   } else {
@@ -2949,7 +3057,14 @@ function applyZoomStructuralVariables(scale = zoomScale) {
   // spaces work across frames, but applying that strategy to month/week/tier
   // headers leaves adjacent labels at different scales after a pinch. Keep one
   // dedicated roadmap-scoped value for the small fixed header set instead.
-  els.roadmap.style.setProperty("--headerTextBoost", legibleTextScale(safeScale).toFixed(3));
+  if (useWebKitCssZoomRendering) {
+    // Keep header typography out of the giant CSS-zoomed subtree. The mobile
+    // overlay is the only rendered header text on this path, so updating the
+    // roadmap-scoped inherited variable would create unnecessary style work.
+    applyWebKitHeaderTextOverlayTypography(safeScale);
+  } else {
+    els.roadmap.style.setProperty("--headerTextBoost", legibleTextScale(safeScale).toFixed(3));
+  }
 }
 function cancelMobileZoomStyleWork({ markDirty = false } = {}) {
   const hadPending = Boolean(mobileZoomStyleJob || mobileZoomStyleFrame || mobileZoomStyleTimer);
@@ -4606,6 +4721,7 @@ function updateAdaptiveTierLabels() {
       if (label.hasAttribute("aria-label")) label.removeAttribute("aria-label");
     }
   }
+  syncWebKitHeaderTierText();
 }
 function mobileCardNameTokens(name) {
   const clean = sanitizeText(name);
@@ -5065,6 +5181,7 @@ function applyPinchPreviewFrame(frame, { visual = true } = {}) {
     // until commit, so the protected rapid-lift scroll-tree mitigation still applies.
     els.roadmap.style.transform = "";
     els.roadmap.style.zoom = String(nextZoom);
+    applyWebKitHeaderTextOverlayScale(nextZoom);
     els.chartStage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0)`;
   } else {
     // Established fallback for older WebKit and the Pointer Events pinch path.
@@ -5253,6 +5370,7 @@ function commitWebKitNativePinchVisual(nextZoom, targetScrollLeft, targetScrollT
     if (useWebKitCssZoomRendering) {
       els.roadmap.style.transform = "";
       els.roadmap.style.zoom = String(zoomScale);
+      applyWebKitHeaderTextOverlayScale(zoomScale);
     } else {
       els.roadmap.style.zoom = "";
       els.roadmap.style.transform = `scale(${zoomScale})`;
