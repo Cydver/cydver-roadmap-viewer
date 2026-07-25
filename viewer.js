@@ -163,6 +163,8 @@ let initialFitTimer = 0;
 let viewportResizeFrame = 0;
 let safeAreaProbeEl = null;
 const TOUCH_ZOOM_SEMANTIC_SETTLE_MS = 420;
+const WEBKIT_PINCH_PREVIEW_MIN_INTERVAL_MS = 11;
+const WEBKIT_PINCH_STALE_EVENT_MS = 50;
 
 function createLayoutGeometryCache() {
   return {
@@ -5054,7 +5056,7 @@ function scheduleTouchGestureFrame() {
   if (touchGestureFrame) return;
   touchGestureFrame = requestAnimationFrame(flushTouchGestureFrame);
 }
-function applyPinchPreviewFrame(frame) {
+function applyPinchPreviewFrame(frame, { visual = true } = {}) {
   if (!frame || !pinchGesture) return;
   const nextZoom = clamp(Number(frame.zoom) || zoomScale, minimumZoom(), MAX_ZOOM);
   const localX = frame.midpointX - pinchGesture.rectLeft;
@@ -5068,10 +5070,11 @@ function applyPinchPreviewFrame(frame) {
     );
     mobileCameraX = camera.x;
     mobileCameraY = camera.y;
-    els.chartStage.style.transform = `translate3d(${camera.x}px, ${camera.y}px, 0) scale(${nextZoom})`;
     pinchGesture.finalZoom = nextZoom;
     pinchGesture.targetCameraX = camera.x;
     pinchGesture.targetCameraY = camera.y;
+    if (!visual) return;
+    els.chartStage.style.transform = `translate3d(${camera.x}px, ${camera.y}px, 0) scale(${nextZoom})`;
     if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(nextZoom * 100)}%`;
     return;
   }
@@ -5083,20 +5086,17 @@ function applyPinchPreviewFrame(frame) {
   const targetScrollTop = clamp(pinchGesture.anchorStageY * ratio - localY, 0, maxScrollTop);
   const translateX = pinchGesture.startScrollLeft - targetScrollLeft;
   const translateY = pinchGesture.startScrollTop - targetScrollTop;
-  // Keep WebKit's native GestureEvent pinch compositor-only. The fallback
-  // Pointer Events path can keep its live card-density preview, but running that
-  // visible-card class sweep on every native gesturechange adds main-thread/style
-  // work to the exact iPhone path that otherwise needs only one transform write.
-  // The existing settled semantic pass reconciles card density after the burst.
-  if (!useWebKitNativeGestureInput) {
-    updateVisiblePinchCardDetailPreview(
-      nextZoom,
-      targetScrollLeft,
-      targetScrollTop,
-      pinchGesture.viewportWidth,
-      pinchGesture.viewportHeight
-    );
-  }
+  pinchGesture.finalZoom = nextZoom;
+  pinchGesture.targetScrollLeft = targetScrollLeft;
+  pinchGesture.targetScrollTop = targetScrollTop;
+  if (!visual) return;
+  updateVisiblePinchCardDetailPreview(
+    nextZoom,
+    targetScrollLeft,
+    targetScrollTop,
+    pinchGesture.viewportWidth,
+    pinchGesture.viewportHeight
+  );
   ensureMobileMetaFocusDimmerCoverage(
     nextZoom,
     targetScrollLeft,
@@ -5105,9 +5105,6 @@ function applyPinchPreviewFrame(frame) {
     pinchGesture.viewportHeight
   );
   els.chartStage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0) scale(${ratio})`;
-  pinchGesture.finalZoom = nextZoom;
-  pinchGesture.targetScrollLeft = targetScrollLeft;
-  pinchGesture.targetScrollTop = targetScrollTop;
   if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(nextZoom * 100)}%`;
 }
 function flushTouchGestureFrame() {
@@ -5452,10 +5449,30 @@ function beginWebKitPinchGesture(event) {
   pendingTouchPanFrame = null;
   const scale = Math.max(0.001, Number(event.scale) || 1);
   webKitNativeTouchHadPinch = true;
-  webKitPinchGesture = { lastScale: scale };
+  webKitPinchGesture = {
+    lastScale: scale,
+    lastPreviewApplyAt: Number.NEGATIVE_INFINITY
+  };
   const clientX = Number(event.clientX);
   const clientY = Number(event.clientY);
   beginPinchGestureAt(Number.isFinite(clientX) ? clientX : innerWidth / 2, Number.isFinite(clientY) ? clientY : innerHeight / 2, 1);
+}
+function webKitGestureEventAgeMs(event, now = performance.now()) {
+  const timestamp = Number(event?.timeStamp);
+  if (!(timestamp > 0) || !Number.isFinite(now)) return 0;
+
+  // Modern WebKit follows the DOMHighResTimeStamp time origin, but older Safari
+  // builds have used a different timestamp basis. Only trust a candidate that is
+  // plausibly in the same clock domain; otherwise disable stale-event filtering.
+  const directAge = now - timestamp;
+  if (directAge >= -5 && directAge < 60000) return Math.max(0, directAge);
+
+  const timeOrigin = Number(performance.timeOrigin);
+  if (Number.isFinite(timeOrigin)) {
+    const epochAge = timeOrigin + now - timestamp;
+    if (epochAge >= -5 && epochAge < 60000) return Math.max(0, epochAge);
+  }
+  return 0;
 }
 function moveWebKitPinchGesture(event) {
   if (!useWebKitNativeGestureInput || !webKitPinchGesture || !pinchGesture) return;
@@ -5470,19 +5487,39 @@ function moveWebKitPinchGesture(event) {
     MAX_ZOOM
   );
   pinchGesture.moved = true;
-  suppressTouchClickUntil = performance.now() + 400;
+  const now = performance.now();
+  suppressTouchClickUntil = now + 400;
 
-  // Apply the latest native gesture scale immediately. WebKit batches the style
-  // mutation for presentation; avoiding an extra rAF hop removes a frame of input
-  // latency on iOS, where web content may otherwise update less frequently than a
-  // 120 Hz native UIKit gesture.
   const clientX = Number(event.clientX);
   const clientY = Number(event.clientY);
-  applyPinchPreviewFrame({
+  const previewFrame = {
     zoom: pinchGesture.previewZoom,
     midpointX: Number.isFinite(clientX) ? clientX : innerWidth / 2,
     midpointY: Number.isFinite(clientY) ? clientY : innerHeight / 2
-  });
+  };
+
+  // Keep the proven immediate native GestureEvent path while the fitted roadmap
+  // is narrower than the scrollport. Once it reaches/exceeds the viewport width,
+  // transformed overflow and the native scrolling layer become substantially more
+  // expensive on iOS. A 120 Hz gesture stream can then submit compositor work
+  // faster than WebKit presents it, producing visible stale-frame replay or a long
+  // catch-up after a stall. Do not use rAF here: that continuation-pinch experiment
+  // regressed real-device stability. Instead, synchronously retain every logical
+  // scale/anchor update but suppress only redundant high-rate or already-late
+  // visual writes. 60 Hz input, slow pinches, and the final committed geometry are
+  // unchanged; queued events collapse toward their newest state instead of each
+  // forcing another whole-stage transform.
+  const fillsViewport = pinchGesture.baseWidth * pinchGesture.previewZoom >= pinchGesture.viewportWidth - 0.5;
+  const sinceLastVisual = now - Number(webKitPinchGesture.lastPreviewApplyAt);
+  const staleEvent = webKitGestureEventAgeMs(event, now) > WEBKIT_PINCH_STALE_EVENT_MS;
+  const highRateEvent = sinceLastVisual < WEBKIT_PINCH_PREVIEW_MIN_INTERVAL_MS;
+  if (fillsViewport && (staleEvent || highRateEvent)) {
+    applyPinchPreviewFrame(previewFrame, { visual: false });
+    return;
+  }
+
+  webKitPinchGesture.lastPreviewApplyAt = now;
+  applyPinchPreviewFrame(previewFrame);
 }
 function endWebKitPinchGesture(event) {
   if (!useWebKitNativeGestureInput) return;
