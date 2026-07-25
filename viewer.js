@@ -129,6 +129,7 @@ let pendingDirectTouchClickSuppression = null;
 let lastInputModality = "pointer";
 let profileReturnFocusByKeyboard = false;
 let useWebKitNativeGestureInput = false;
+let useWebKitCssZoomRendering = false;
 let webKitPinchGesture = null;
 let webKitNativeTouchHadPinch = false;
 let webKitPinchBurstSettleTimer = 0;
@@ -488,7 +489,14 @@ function bindControls() {
   // re-enable the failed persistent transform-camera architecture.
   useWebKitNativeGestureInput = isMobileTouchViewport()
     && ("ongesturestart" in window || typeof window.GestureEvent === "function");
+  // Modern WebKit's CSS zoom path avoids continuously JS-scaling one enormous
+  // composited roadmap surface. Safari 26.4 fixed used-value geometry and
+  // getBoundingClientRect() for CSS zoom, so probe that behavior once rather than
+  // selecting this path from a user-agent/version string. Older/incorrect engines
+  // stay on the established transform fallback.
+  useWebKitCssZoomRendering = useWebKitNativeGestureInput && supportsModernWebKitCssZoom();
   els.chartScroll.classList.toggle("webkit-native-gesture-input", useWebKitNativeGestureInput);
+  els.chartScroll.classList.toggle("webkit-css-zoom-pinch", useWebKitCssZoomRendering);
   if (useWebKitNativeGestureInput) {
     els.chartScroll.addEventListener("gesturestart", beginWebKitPinchGesture, { passive: false });
     els.chartScroll.addEventListener("gesturechange", moveWebKitPinchGesture, { passive: false });
@@ -2811,6 +2819,17 @@ function isMobileTouchViewport() {
   }
   return Boolean(mobileTouchMediaQuery?.matches);
 }
+function supportsModernWebKitCssZoom() {
+  if (typeof window.CSS?.supports !== "function" || !window.CSS.supports("zoom", "2")) return false;
+  if (!document.body) return false;
+  const probe = document.createElement("div");
+  probe.setAttribute("aria-hidden", "true");
+  probe.style.cssText = "position:fixed;left:-10000px;top:-10000px;width:17px;height:13px;zoom:2;visibility:hidden;pointer-events:none;";
+  document.body.appendChild(probe);
+  const rect = probe.getBoundingClientRect();
+  probe.remove();
+  return Math.abs(rect.width - 34) < 0.5 && Math.abs(rect.height - 26) < 0.5;
+}
 function useMobileTransformCamera() {
   // The persistent whole-stage transform camera is intentionally disabled. Real
   // iPhone Safari testing showed severe pan/pinch freezes when this path stayed
@@ -2895,14 +2914,25 @@ function applyZoomGeometry() {
     // Mobile owns navigation as a single transform camera. Do not bounce between
     // CSS transforms and hidden scroll offsets at gesture boundaries. Keeping the
     // camera in one coordinate system avoids scroll-tree/compositor handoffs on iOS.
+    els.roadmap.style.zoom = "";
     els.roadmap.style.transform = "";
     els.chartStage.style.width = `${width}px`;
     els.chartStage.style.height = `${height}px`;
     if (els.chartScroll.scrollLeft) els.chartScroll.scrollLeft = 0;
     if (els.chartScroll.scrollTop) els.chartScroll.scrollTop = 0;
     applyMobileCameraTransform(mobileCameraX, mobileCameraY, zoomScale);
+  } else if (useWebKitCssZoomRendering) {
+    // Safari's native pinch path uses layout zoom rather than continuously scaling
+    // the full roadmap as one JS-driven composited transform. The scroll stage still
+    // owns the exact committed extent, preserving the existing native-scroll camera.
+    els.chartStage.style.transform = "";
+    els.roadmap.style.transform = "";
+    els.roadmap.style.zoom = String(zoomScale);
+    els.chartStage.style.width = `${width * zoomScale}px`;
+    els.chartStage.style.height = `${height * zoomScale}px`;
   } else {
     els.chartStage.style.transform = "";
+    els.roadmap.style.zoom = "";
     els.roadmap.style.transform = `scale(${zoomScale})`;
     els.chartStage.style.width = `${width * zoomScale}px`;
     els.chartStage.style.height = `${height * zoomScale}px`;
@@ -5024,10 +5054,18 @@ function applyPinchPreviewFrame(frame, { visual = true } = {}) {
     pinchGesture.viewportWidth,
     pinchGesture.viewportHeight
   );
-  // Match the older smooth iPhone/desktop rendering model: the roadmap keeps its
-  // already-committed scale and live pinch is one compositor preview on chartStage.
-  // No grid/style/layout mutation occurs in this path.
-  els.chartStage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0) scale(${ratio})`;
+  if (useWebKitCssZoomRendering) {
+    // Do not animate a giant transform scale on modern WebKit. CSS zoom changes the
+    // roadmap's absolute scale while a translation-only stage preview preserves the
+    // finger anchor. Stage width/height and native scroll offsets remain untouched
+    // until commit, so the protected rapid-lift scroll-tree mitigation still applies.
+    els.roadmap.style.transform = "";
+    els.roadmap.style.zoom = String(nextZoom);
+    els.chartStage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0)`;
+  } else {
+    // Established fallback for older WebKit and the Pointer Events pinch path.
+    els.chartStage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0) scale(${ratio})`;
+  }
   if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(nextZoom * 100)}%`;
 }
 function flushTouchGestureFrame() {
@@ -5208,7 +5246,13 @@ function commitWebKitNativePinchVisual(nextZoom, targetScrollLeft, targetScrollT
     applyZoomGeometry();
   } else {
     els.chartStage.style.transform = "";
-    els.roadmap.style.transform = `scale(${zoomScale})`;
+    if (useWebKitCssZoomRendering) {
+      els.roadmap.style.transform = "";
+      els.roadmap.style.zoom = String(zoomScale);
+    } else {
+      els.roadmap.style.zoom = "";
+      els.roadmap.style.transform = `scale(${zoomScale})`;
+    }
     if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
     mobileStageShrinkPending = zoomScale < mobileStageGeometryScale - 0.0001;
   }

@@ -4558,12 +4558,12 @@ body {
   }
 }
 
-/* --- Mobile responsiveness repair: preserve the roadmap's full layout/paint/style
-   isolation while keeping touch geometry visually compact. This matches the proven
-   native-pinch rendering boundary used by the earlier smooth iPhone baseline. --- */
+/* --- Mobile responsiveness repair: keep the roadmap paint/style isolated without
+   forcing layout containment on iOS. Real-device testing showed contain:layout made
+   continuous native pinch stalls substantially worse in the current dense roadmap. --- */
 @media (pointer: coarse) {
   .roadmap {
-    contain: layout paint style;
+    contain: paint style;
   }
   /* Promote the very large stage only while fingers are actively moving it. */
   .chart-stage {
