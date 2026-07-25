@@ -2921,16 +2921,11 @@ function applyZoomGeometry() {
     if (els.chartScroll.scrollLeft) els.chartScroll.scrollLeft = 0;
     if (els.chartScroll.scrollTop) els.chartScroll.scrollTop = 0;
     applyMobileCameraTransform(mobileCameraX, mobileCameraY, zoomScale);
-  } else if (useWebKitCssZoomRendering) {
-    // Safari's native pinch path uses layout zoom rather than continuously scaling
-    // the full roadmap as one JS-driven composited transform. The scroll stage still
-    // owns the exact committed extent, preserving the existing native-scroll camera.
-    els.chartStage.style.transform = "";
-    els.roadmap.style.transform = "";
-    els.roadmap.style.zoom = String(zoomScale);
-    els.chartStage.style.width = `${width * zoomScale}px`;
-    els.chartStage.style.height = `${height * zoomScale}px`;
   } else {
+    // Keep the settled roadmap on the same transform renderer used by desktop.
+    // Modern WebKit uses CSS zoom only while fingers are actively pinching; one
+    // settled transform commit preserves exact cross-platform typography/layout
+    // without returning to continuous transform-scale updates during the gesture.
     els.chartStage.style.transform = "";
     els.roadmap.style.zoom = "";
     els.roadmap.style.transform = `scale(${zoomScale})`;
@@ -5246,13 +5241,11 @@ function commitWebKitNativePinchVisual(nextZoom, targetScrollLeft, targetScrollT
     applyZoomGeometry();
   } else {
     els.chartStage.style.transform = "";
-    if (useWebKitCssZoomRendering) {
-      els.roadmap.style.transform = "";
-      els.roadmap.style.zoom = String(zoomScale);
-    } else {
-      els.roadmap.style.zoom = "";
-      els.roadmap.style.transform = `scale(${zoomScale})`;
-    }
+    // Even when live native pinch used CSS zoom, settle back onto the same
+    // transform-rendered roadmap as desktop while retaining the larger scroll
+    // extent across a rapid lift/re-pinch continuation burst.
+    els.roadmap.style.zoom = "";
+    els.roadmap.style.transform = `scale(${zoomScale})`;
     if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
     mobileStageShrinkPending = zoomScale < mobileStageGeometryScale - 0.0001;
   }

@@ -4859,3 +4859,20 @@ body {
     height: 20px;
   }
 }
+
+
+/* --- Native WebKit live CSS-zoom geometry repair ---
+   The rapid pinch/lift mitigation intentionally retains the previous larger
+   chart-stage extent while a pinch burst is active. CSS zoom only scales the
+   roadmap contents; leaving min-width/min-height at 100% would therefore force
+   the roadmap box back out to that retained stage size during a zoom-out. That
+   makes inset-based grid lines and header geometry visually span the stale stage.
+   On the modern WebKit pinch path, let the roadmap's explicit base width/height
+   remain authoritative in both live CSS-zoom preview and settled transform state.
+   The retained stage is only scroll extent; it must never resize roadmap content. */
+@media (pointer: coarse) {
+  .chart-scroll.webkit-css-zoom-pinch .roadmap {
+    min-width: 0;
+    min-height: 0;
+  }
+}
