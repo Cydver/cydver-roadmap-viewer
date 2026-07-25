@@ -163,6 +163,7 @@ h1 {
 .chart-scroll {
   min-height: 0;
   overflow: auto;
+  scrollbar-width: none;
   border: 1px solid rgba(255,255,255,.1);
   background:
     linear-gradient(rgba(255,255,255,.032) 1px, transparent 1px),
@@ -172,6 +173,13 @@ h1 {
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   position: relative;
+}
+
+
+.chart-scroll::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .chart-stage {
