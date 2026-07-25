@@ -1881,18 +1881,42 @@ function positionSmartTooltip(element, event, anchorEl = null, maxWidth = 360) {
 
   // Preserve the original smart-placement result everywhere except the one
   // roadmap-specific failure case: a unit-card tooltip chosen on the right
-  // while actually covering that unit's rightward meta bar. In that case,
-  // stay local and choose the better original vertical candidate instead.
+  // while actually covering that unit's rightward meta bar. Keep the tooltip
+  // on the same local side and shift it vertically just enough to clear the
+  // owner's meta bar. If that cannot be done without covering the trigger or
+  // leaving the viewport, keep the original result rather than introducing a
+  // worse fallback that obscures the hovered card/cursor.
   if (best?.placement === "right" && ownerMetaBars.some(rect => tooltipIntersectionArea(best.rect, rect) > 0)) {
-    const verticalAlternatives = candidates.filter(candidate => candidate.placement === "top" || candidate.placement === "bottom");
-    verticalAlternatives.sort((a, b) => {
-      const aMetaOverlap = ownerMetaBars.reduce((sum, rect) => sum + tooltipIntersectionArea(a.rect, rect), 0);
-      const bMetaOverlap = ownerMetaBars.reduce((sum, rect) => sum + tooltipIntersectionArea(b.rect, rect), 0);
-      const aAnchorOverlap = tooltipIntersectionArea(a.rect, anchorRect);
-      const bAnchorOverlap = tooltipIntersectionArea(b.rect, anchorRect);
-      return aMetaOverlap - bMetaOverlap || aAnchorOverlap - bAnchorOverlap || a.score - b.score;
-    });
-    if (verticalAlternatives[0]) best = verticalAlternatives[0];
+    const horizontallyRelevantMetaBars = ownerMetaBars.filter(rect =>
+      Math.min(best.rect.right, rect.right) > Math.max(best.rect.left, rect.left)
+    );
+    if (horizontallyRelevantMetaBars.length) {
+      const metaGap = 10;
+      const highestMetaTop = Math.min(...horizontallyRelevantMetaBars.map(rect => rect.top));
+      const lowestMetaBottom = Math.max(...horizontallyRelevantMetaBars.map(rect => rect.bottom));
+      const shiftedTops = [
+        highestMetaTop - metaGap - tooltipRect.height,
+        lowestMetaBottom + metaGap
+      ];
+      const shiftedCandidates = shiftedTops.map(top => {
+        if (top < safeTop || top > maxTop) return null;
+        const rect = { left: best.left, top, right: best.left + tooltipRect.width, bottom: top + tooltipRect.height };
+        if (tooltipIntersectionArea(rect, anchorRect) > 0) return null;
+        if (ownerMetaBars.some(metaRect => tooltipIntersectionArea(rect, metaRect) > 0)) return null;
+        const obstacleOverlap = ownerObstacles.reduce((sum, obstacle) =>
+          sum + tooltipIntersectionArea(rect, obstacle.rect) * obstacle.weight, 0
+        );
+        return {
+          left: best.left,
+          top,
+          placement: "right",
+          rect,
+          score: best.score + Math.abs(top - best.top) * 18 + obstacleOverlap
+        };
+      }).filter(Boolean);
+      shiftedCandidates.sort((a, b) => a.score - b.score);
+      if (shiftedCandidates[0]) best = shiftedCandidates[0];
+    }
   }
 
   element.dataset.placement = best.placement;
