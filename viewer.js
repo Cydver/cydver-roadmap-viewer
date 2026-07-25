@@ -1780,16 +1780,22 @@ function tooltipPlacementOrder(anchorEl, anchorRect) {
     if (anchorEl.classList.contains("unit-card")) {
       const lane = els.roadmap.querySelector(`.lane-track[data-unit-id="${CSS.escape(ownerId)}"]`);
       const laneRect = lane?.getBoundingClientRect();
-      if (laneRect) return laneRect.top + laneRect.height / 2 >= anchorRect.top + anchorRect.height / 2
-        ? ["top", "right", "left", "bottom"]
-        : ["bottom", "right", "left", "top"];
+      if (laneRect) {
+        const preferred = laneRect.top + laneRect.height / 2 >= anchorRect.top + anchorRect.height / 2 ? "top" : "bottom";
+        const opposite = preferred === "top" ? "bottom" : "top";
+        // Meta always flows to the right of the card. Exhaust vertical and left-side
+        // placements before considering that protected timeline direction.
+        return [preferred, opposite, "left", "right"];
+      }
     }
     if (anchorEl.classList.contains("meta-bar")) {
       const card = els.roadmap.querySelector(`.unit-card[data-id="${CSS.escape(ownerId)}"]`);
       const cardRect = card?.getBoundingClientRect();
-      if (cardRect) return cardRect.top + cardRect.height / 2 <= anchorRect.top + anchorRect.height / 2
-        ? ["bottom", "right", "left", "top"]
-        : ["top", "right", "left", "bottom"];
+      if (cardRect) {
+        const preferred = cardRect.top + cardRect.height / 2 <= anchorRect.top + anchorRect.height / 2 ? "bottom" : "top";
+        const opposite = preferred === "top" ? "bottom" : "top";
+        return [preferred, opposite, "left", "right"];
+      }
     }
   }
   return ["right", "left", "bottom", "top"];
@@ -1800,13 +1806,37 @@ function tooltipOwnerObstacleRects(anchorEl) {
   if (!ownerId) return [];
   const id = CSS.escape(ownerId);
   const nodes = els.roadmap.querySelectorAll(
-    `.unit-card[data-id="${id}"],.meta-bar[data-unit-id="${id}"],.meta-link[data-unit-id="${id}"],` +
-    `.meta-owner-tether[data-unit-id="${id}"],.meta-owner-node[data-unit-id="${id}"]`
+    `.unit-card[data-id="${id}"],.lane-track[data-unit-id="${id}"],.meta-bar[data-unit-id="${id}"],` +
+    `.meta-link[data-unit-id="${id}"],.meta-owner-tether[data-unit-id="${id}"],.meta-owner-node[data-unit-id="${id}"]`
   );
   return Array.from(nodes).filter(node => node !== anchorEl).map(node => {
-    const rect = node.getBoundingClientRect();
-    const weight = node.classList.contains("meta-bar") ? 12 : node.classList.contains("unit-card") ? 11 : 5;
-    return { rect, weight };
+    const source = node.getBoundingClientRect();
+    const isLane = node.classList.contains("lane-track");
+    const isMeta = node.classList.contains("meta-bar")
+      || node.classList.contains("meta-link")
+      || node.classList.contains("meta-owner-tether")
+      || node.classList.contains("meta-owner-node")
+      || isLane;
+    const pad = isLane ? 8 : isMeta ? 4 : 2;
+    const rect = {
+      left: source.left - pad,
+      top: source.top - pad,
+      right: source.right + pad,
+      bottom: source.bottom + pad,
+      width: source.width + pad * 2,
+      height: source.height + pad * 2
+    };
+    const weight = node.classList.contains("meta-bar") ? 16
+      : isLane ? 14
+      : isMeta ? 12
+      : node.classList.contains("unit-card") ? 11
+      : 5;
+    const kind = node.classList.contains("meta-bar") ? "meta-bar"
+      : isLane ? "lane"
+      : node.classList.contains("unit-card") ? "unit-card"
+      : isMeta ? "meta-structure"
+      : "other";
+    return { rect, weight, critical: isMeta || node.classList.contains("unit-card"), kind };
   }).filter(item => item.rect.width > 0 && item.rect.height > 0);
 }
 function viewportSafeAreaInsets() {
@@ -1849,9 +1879,52 @@ function positionSmartTooltip(element, event, anchorEl = null, maxWidth = 360) {
   const ownerObstacles = tooltipOwnerObstacleRects(reference);
   const maxLeft = Math.max(safeLeft, safeRight - tooltipRect.width);
   const maxTop = Math.max(safeTop, safeBottom - tooltipRect.height);
-  const candidates = order.map((placement, preferenceIndex) => {
-    let rawLeft = anchorRect.left + (anchorRect.width - tooltipRect.width) / 2;
-    let rawTop = anchorRect.top + (anchorRect.height - tooltipRect.height) / 2;
+  const roadmapTooltip = element.classList.contains("unit-tooltip-card") && reference && els.roadmap?.contains(reference);
+  const protectsRightwardMetaFlow = roadmapTooltip
+    && (reference.classList.contains("unit-card") || reference.classList.contains("meta-bar"));
+
+  const specs = order
+    .filter(placement => !(protectsRightwardMetaFlow && placement === "right"))
+    .map((placement, preferenceIndex) => ({ placement, preferenceIndex }));
+  if (roadmapTooltip) {
+    // If all adjacent positions are cramped, detach the tooltip into a safe corner
+    // of the chart viewport rather than covering the owner's timeline. This is a
+    // last-resort spatial fallback, not a new persistent/docked UI mode.
+    const chartRect = els.chartScroll?.getBoundingClientRect();
+    const dockLeft = Math.max(safeLeft, Number(chartRect?.left) || safeLeft);
+    const dockTop = Math.max(safeTop, Number(chartRect?.top) || safeTop);
+    const dockRight = Math.min(safeRight, Number(chartRect?.right) || safeRight);
+    const dockBottom = Math.min(safeBottom, Number(chartRect?.bottom) || safeBottom);
+    const dockMaxLeft = Math.max(dockLeft, dockRight - tooltipRect.width);
+    const dockMaxTop = Math.max(dockTop, dockBottom - tooltipRect.height);
+    const rightIndex = specs.findIndex(spec => spec.placement === "right");
+    const insertAt = rightIndex >= 0 ? rightIndex : specs.length;
+    const fallbackSpecs = [
+      { placement: "dock-top-left", preferenceIndex: insertAt + .10, rawLeft: dockLeft, rawTop: dockTop },
+      { placement: "dock-bottom-left", preferenceIndex: insertAt + .20, rawLeft: dockLeft, rawTop: dockMaxTop },
+      { placement: "dock-top-right", preferenceIndex: insertAt + .30, rawLeft: dockMaxLeft, rawTop: dockTop },
+      { placement: "dock-bottom-right", preferenceIndex: insertAt + .40, rawLeft: dockMaxLeft, rawTop: dockMaxTop }
+    ];
+    // Tall tooltips can span the meta lane even from a viewport corner. In that
+    // case, also try the free space immediately before/after the actual owner bar.
+    // This is especially useful near the left edge where "left of the icon" is
+    // impossible but "left of the bar" can still be clear.
+    ownerObstacles.filter(obstacle => obstacle.kind === "meta-bar").forEach((obstacle, obstacleIndex) => {
+      const baseIndex = insertAt + .50 + obstacleIndex * .04;
+      fallbackSpecs.push(
+        { placement: "meta-before-top", preferenceIndex: baseIndex, rawLeft: obstacle.rect.left - tooltipRect.width - gap, rawTop: dockTop },
+        { placement: "meta-before-bottom", preferenceIndex: baseIndex + .01, rawLeft: obstacle.rect.left - tooltipRect.width - gap, rawTop: dockMaxTop },
+        { placement: "meta-after-top", preferenceIndex: baseIndex + .02, rawLeft: obstacle.rect.right + gap, rawTop: dockTop },
+        { placement: "meta-after-bottom", preferenceIndex: baseIndex + .03, rawLeft: obstacle.rect.right + gap, rawTop: dockMaxTop }
+      );
+    });
+    specs.splice(insertAt, 0, ...fallbackSpecs);
+  }
+
+  const candidates = specs.map(spec => {
+    const { placement, preferenceIndex } = spec;
+    let rawLeft = Number.isFinite(spec.rawLeft) ? spec.rawLeft : anchorRect.left + (anchorRect.width - tooltipRect.width) / 2;
+    let rawTop = Number.isFinite(spec.rawTop) ? spec.rawTop : anchorRect.top + (anchorRect.height - tooltipRect.height) / 2;
     if (placement === "right") rawLeft = anchorRect.right + gap;
     if (placement === "left") rawLeft = anchorRect.left - tooltipRect.width - gap;
     if (placement === "bottom") rawTop = anchorRect.bottom + gap;
@@ -1861,19 +1934,58 @@ function positionSmartTooltip(element, event, anchorEl = null, maxWidth = 360) {
     const candidateRect = { left, top, right: left + tooltipRect.width, bottom: top + tooltipRect.height };
     let score = preferenceIndex * 650 + (Math.abs(left - rawLeft) + Math.abs(top - rawTop)) * 18;
     const anchorOverlap = tooltipIntersectionArea(candidateRect, anchorRect);
+    let metaBarOverlapArea = 0;
+    let criticalOverlapArea = 0;
+    let laneOverlapArea = 0;
     if (anchorOverlap) score += 2_000_000 + anchorOverlap * 20;
     for (const obstacle of ownerObstacles) {
       const area = tooltipIntersectionArea(candidateRect, obstacle.rect);
-      if (area) score += obstacle.weight * (1800 + area);
+      if (!area) continue;
+      if (obstacle.kind === "meta-bar") {
+        metaBarOverlapArea += area;
+        score += 4_000_000 + area * 80;
+      } else if (obstacle.kind === "lane") {
+        // Empty lane space is a visual corridor, but covering it is still better
+        // than covering the actual encoded meta bar when the viewport is cramped.
+        laneOverlapArea += area;
+        score += 240_000 + area * 24;
+      } else if (obstacle.critical) {
+        criticalOverlapArea += area;
+        score += 3_000_000 + area * 60;
+      } else {
+        score += obstacle.weight * (1800 + area);
+      }
     }
-    return { left, top, placement, score };
+    const blocksRightwardFlow = protectsRightwardMetaFlow && placement === "right";
+    if (blocksRightwardFlow) score += 2_500_000;
+    return {
+      left,
+      top,
+      placement,
+      score,
+      hardConflicts: Number(anchorOverlap > 0) + Number(metaBarOverlapArea > 0) + Number(criticalOverlapArea > 0),
+      blocksRightwardFlow: Number(blocksRightwardFlow),
+      metaBarOverlapArea,
+      criticalOverlapArea,
+      laneOverlapArea,
+      anchorOverlap
+    };
   });
-  candidates.sort((a, b) => a.score - b.score);
+  candidates.sort((a, b) =>
+    a.hardConflicts - b.hardConflicts
+    || a.blocksRightwardFlow - b.blocksRightwardFlow
+    || a.metaBarOverlapArea - b.metaBarOverlapArea
+    || a.criticalOverlapArea - b.criticalOverlapArea
+    || a.laneOverlapArea - b.laneOverlapArea
+    || a.anchorOverlap - b.anchorOverlap
+    || a.score - b.score
+  );
   const best = candidates[0];
   element.dataset.placement = best.placement;
   element.style.left = `${Math.round(best.left)}px`;
   element.style.top = `${Math.round(best.top)}px`;
 }
+
 function positionAppTooltip(element, event, anchorEl = null) {
   positionSmartTooltip(element, event, anchorEl, 360);
 }
