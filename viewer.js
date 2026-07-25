@@ -5050,22 +5050,6 @@ function clearTouchStageTransform() {
   if (useMobileTransformCamera()) applyMobileCameraTransform();
   else els.chartStage.style.transform = "";
 }
-function maybeIsolateWebKitOverflowPinch(nextZoom) {
-  if (
-    !useWebKitNativeGestureInput
-    || !pinchGesture
-    || pinchGesture.overflowIsolationActive
-    || nextZoom <= pinchGesture.startZoom + 0.0001
-  ) return;
-  const overflowsScrollport = pinchGesture.baseWidth * nextZoom > pinchGesture.viewportWidth + 0.5
-    || pinchGesture.baseHeight * nextZoom > pinchGesture.viewportHeight + 0.5;
-  if (!overflowsScrollport) return;
-  pinchGesture.overflowIsolationActive = true;
-  els.chartScroll.classList.add("touch-overflow-pinch");
-}
-function clearWebKitOverflowPinchIsolation() {
-  els.chartScroll?.classList.remove("touch-overflow-pinch");
-}
 function scheduleTouchGestureFrame() {
   if (touchGestureFrame) return;
   touchGestureFrame = requestAnimationFrame(flushTouchGestureFrame);
@@ -5092,7 +5076,6 @@ function applyPinchPreviewFrame(frame) {
     return;
   }
 
-  maybeIsolateWebKitOverflowPinch(nextZoom);
   const ratio = nextZoom / pinchGesture.startZoom;
   const maxScrollLeft = Math.max(0, pinchGesture.baseWidth * nextZoom - pinchGesture.viewportWidth);
   const maxScrollTop = Math.max(0, pinchGesture.baseHeight * nextZoom - pinchGesture.viewportHeight);
@@ -5338,7 +5321,6 @@ function beginPinchGestureAt(midpointX, midpointY, distance = 1) {
   cancelDeferredTouchZoomPresentation();
   flushPendingTouchGestureFrame();
   clearTouchStageTransform();
-  clearWebKitOverflowPinchIsolation();
 
   const rect = els.chartScroll.getBoundingClientRect();
   const localX = midpointX - rect.left;
@@ -5369,7 +5351,6 @@ function beginPinchGestureAt(midpointX, midpointY, distance = 1) {
     targetScrollTop: startScrollTop,
     targetCameraX: mobileCameraX,
     targetCameraY: mobileCameraY,
-    overflowIsolationActive: false,
     moved: false
   };
   pendingTouchPinchFrame = null;
@@ -5398,7 +5379,6 @@ function finishWebKitPinchGesture() {
   pinchGesture = null;
   pendingTouchPinchFrame = null;
   clearTouchStageTransform();
-  clearWebKitOverflowPinchIsolation();
   // Keep the already-created compositor layer warm across a rapid lift/re-pinch
   // burst. Repeatedly demoting/promoting the giant chart stage is unnecessary
   // layer/backing-store churn; release it once the same idle window used by mobile
@@ -5702,7 +5682,6 @@ function recoverInterruptedPointerInteractions({ schedulePresentation = true } =
     }
     clearTouchStageTransform();
     els.chartScroll.classList.remove("touch-gesturing", "touch-pinching");
-    clearWebKitOverflowPinchIsolation();
   }
 
   if (panDrag) {
