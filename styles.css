@@ -18,6 +18,7 @@
   --bar-h: 18px;
   --weeks: 12;
   --textBoost: 1;
+  --headerTextBoost: 1;
   --barTextBoost: 1;
   --gridLine: 1px;
   --monthGridLine: 2px;
@@ -205,7 +206,7 @@ h1 {
   color: #eff5ff;
   text-transform: uppercase;
   letter-spacing: .12em;
-  font-size: calc(14px * var(--textBoost));
+  font-size: calc(14px * var(--headerTextBoost, var(--textBoost)));
   font-weight: 950;
   background: rgba(255,255,255,.025);
 }
@@ -224,7 +225,7 @@ h1 {
   justify-content: center;
   border-bottom: 1px solid var(--line);
   color: #cbd7e8;
-  font-size: calc(12px * var(--textBoost));
+  font-size: calc(12px * var(--headerTextBoost, var(--textBoost)));
   letter-spacing: .14em;
   font-weight: 950;
 }
@@ -240,7 +241,7 @@ h1 {
   background: linear-gradient(90deg, rgba(255,255,255,.04), rgba(255,255,255,.012));
   text-transform: uppercase;
   letter-spacing: .12em;
-  font-size: calc(15px * var(--textBoost));
+  font-size: calc(15px * var(--headerTextBoost, var(--textBoost)));
   font-weight: 950;
   text-shadow: 0 0 18px color-mix(in srgb, currentColor 28%, transparent);
 }
@@ -4861,15 +4862,12 @@ body {
 }
 
 
-/* --- Native WebKit live CSS-zoom geometry repair ---
-   The rapid pinch/lift mitigation intentionally retains the previous larger
-   chart-stage extent while a pinch burst is active. CSS zoom only scales the
-   roadmap contents; leaving min-width/min-height at 100% would therefore force
-   the roadmap box back out to that retained stage size during a zoom-out. That
-   makes inset-based grid lines and header geometry visually span the stale stage.
-   On the modern WebKit pinch path, let the roadmap's explicit base width/height
-   remain authoritative in both live CSS-zoom preview and settled transform state.
-   The retained stage is only scroll extent; it must never resize roadmap content. */
+/* --- Native WebKit CSS-zoom visual bounds ---
+   The smooth iPhone path keeps CSS zoom active between gestures. During rapid
+   zoom-out bursts the chart stage may intentionally retain an older, larger
+   scroll extent; do not let roadmap min-size percentages stretch the actual
+   roadmap/grid/header box to that retained extent. Explicit roadmap width/height
+   from renderChart remain authoritative. */
 @media (pointer: coarse) {
   .chart-scroll.webkit-css-zoom-pinch .roadmap {
     min-width: 0;

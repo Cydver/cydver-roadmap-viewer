@@ -2921,11 +2921,16 @@ function applyZoomGeometry() {
     if (els.chartScroll.scrollLeft) els.chartScroll.scrollLeft = 0;
     if (els.chartScroll.scrollTop) els.chartScroll.scrollTop = 0;
     applyMobileCameraTransform(mobileCameraX, mobileCameraY, zoomScale);
+  } else if (useWebKitCssZoomRendering) {
+    // Safari's native pinch path uses layout zoom rather than continuously scaling
+    // the full roadmap as one JS-driven composited transform. The scroll stage still
+    // owns the exact committed extent, preserving the existing native-scroll camera.
+    els.chartStage.style.transform = "";
+    els.roadmap.style.transform = "";
+    els.roadmap.style.zoom = String(zoomScale);
+    els.chartStage.style.width = `${width * zoomScale}px`;
+    els.chartStage.style.height = `${height * zoomScale}px`;
   } else {
-    // Keep the settled roadmap on the same transform renderer used by desktop.
-    // Modern WebKit uses CSS zoom only while fingers are actively pinching; one
-    // settled transform commit preserves exact cross-platform typography/layout
-    // without returning to continuous transform-scale updates during the gesture.
     els.chartStage.style.transform = "";
     els.roadmap.style.zoom = "";
     els.roadmap.style.transform = `scale(${zoomScale})`;
@@ -2940,6 +2945,11 @@ function applyZoomStructuralVariables(scale = zoomScale) {
   const gridLinePx = clamp(1 / safeScale, 1, 1 / minimumZoom());
   els.roadmap.style.setProperty("--gridLine", `${gridLinePx.toFixed(2)}px`);
   els.roadmap.style.setProperty("--monthGridLine", `${(gridLinePx * 2).toFixed(2)}px`);
+  // Header text must settle atomically. The mobile semantic slicer deliberately
+  // spaces work across frames, but applying that strategy to month/week/tier
+  // headers leaves adjacent labels at different scales after a pinch. Keep one
+  // dedicated roadmap-scoped value for the small fixed header set instead.
+  els.roadmap.style.setProperty("--headerTextBoost", legibleTextScale(safeScale).toFixed(3));
 }
 function cancelMobileZoomStyleWork({ markDirty = false } = {}) {
   const hadPending = Boolean(mobileZoomStyleJob || mobileZoomStyleFrame || mobileZoomStyleTimer);
@@ -3862,13 +3872,12 @@ function rebuildMobileStaticPresentationIndex() {
   }
   // Viewer roadmap markup is immutable after render. Query the semantic/style
   // targets once instead of rediscovering hundreds of elements after every pinch.
-  const headers = Array.from(els.roadmap.querySelectorAll(".month-head,.week-head,.tier-label"));
   const ownership = Array.from(els.roadmap.querySelectorAll(
     ".lane-track,.meta-owner-tether,.meta-owner-node,.meta-bar,.meta-link"
   ));
-  // Cards are handled together with their density state so the text scale and
-  // visibility decision become visible in the same bounded slice.
-  mobileTextBoostTargetsCache = [...headers, ...ownership];
+  // Month/week/tier headers use the atomic --headerTextBoost roadmap variable.
+  // Keep only the heavier ownership decoration on the cancellable sliced path.
+  mobileTextBoostTargetsCache = ownership;
   mobileMetaLabelEntriesCache = Array.from(els.roadmap.querySelectorAll(".meta-bar")).map(bar => ({
     bar,
     label: bar.querySelector(".bar-label")
@@ -5241,16 +5250,22 @@ function commitWebKitNativePinchVisual(nextZoom, targetScrollLeft, targetScrollT
     applyZoomGeometry();
   } else {
     els.chartStage.style.transform = "";
-    // Even when live native pinch used CSS zoom, settle back onto the same
-    // transform-rendered roadmap as desktop while retaining the larger scroll
-    // extent across a rapid lift/re-pinch continuation burst.
-    els.roadmap.style.zoom = "";
-    els.roadmap.style.transform = `scale(${zoomScale})`;
+    if (useWebKitCssZoomRendering) {
+      els.roadmap.style.transform = "";
+      els.roadmap.style.zoom = String(zoomScale);
+    } else {
+      els.roadmap.style.zoom = "";
+      els.roadmap.style.transform = `scale(${zoomScale})`;
+    }
     if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
     mobileStageShrinkPending = zoomScale < mobileStageGeometryScale - 0.0001;
   }
 
   applyZoomStructuralVariables(zoomScale);
+  // Tier fitting is only two labels on mobile and uses cached text metrics, so
+  // reconcile it immediately with the atomic header scale instead of leaving the
+  // left rail in a mixed old/new state while the sliced semantic job catches up.
+  if (useWebKitCssZoomRendering) updateAdaptiveTierLabels();
   els.chartScroll.scrollLeft = targetScrollLeft;
   els.chartScroll.scrollTop = targetScrollTop;
   if (Math.abs(previousZoom - zoomScale) > 0.0001) touchZoomSemanticDirty = true;
