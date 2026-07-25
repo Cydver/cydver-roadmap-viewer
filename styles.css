@@ -4558,11 +4558,12 @@ body {
   }
 }
 
-/* --- Mobile responsiveness repair: keep the roadmap paint-isolated without WebKit's
-   contain:layout forced-layout penalty, and keep touch geometry visually compact. --- */
+/* --- Mobile responsiveness repair: preserve the roadmap's full layout/paint/style
+   isolation while keeping touch geometry visually compact. This matches the proven
+   native-pinch rendering boundary used by the earlier smooth iPhone baseline. --- */
 @media (pointer: coarse) {
   .roadmap {
-    contain: paint style;
+    contain: layout paint style;
   }
   /* Promote the very large stage only while fingers are actively moving it. */
   .chart-stage {

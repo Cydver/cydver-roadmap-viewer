@@ -153,8 +153,6 @@ let mobileCardSpatialBuckets = new Map();
 let mobileCardSpatialMarginX = 0;
 let mobileCardSpatialMarginY = 0;
 let mobileSemanticRectCache = new WeakMap();
-let mobileGridVerticalCache = [];
-let mobileGridHorizontalCache = [];
 let mobileTouchMediaQuery = null;
 let unitProfileBindingGeneration = 0;
 let unitProfileBindingFrame = 0;
@@ -1026,10 +1024,9 @@ function renderChart() {
     monthBoundaries.add(next);
     return next;
   }, 0);
-  // Use the same structural grid markup on desktop and mobile. The older smooth
-  // iPhone path used these exact div lines too; mobile keeps their width updates
-  // in the existing settled/visible-only semantic job instead of touching them
-  // during a live pinch.
+  // Use the same structural grid markup on desktop and mobile. Structural widths
+  // come from two roadmap-scoped CSS variables, so pinch commit updates the whole
+  // grid atomically without per-line mutations during or after the gesture.
   for (let w = 0; w <= weekCount(); w++) {
     const line = addDiv(`grid-line v${monthBoundaries.has(w) ? " month" : ""}`, {
       left: `${weekBoundaryX(w)}px`
@@ -2913,9 +2910,9 @@ function applyZoomGeometry() {
   mobileStageGeometryScale = zoomScale;
   if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
 }
-function applyZoomStructuralVariables() {
-  if (isMobileTouchViewport()) return;
-  const gridLinePx = clamp(1 / zoomScale, 1, 1 / minimumZoom());
+function applyZoomStructuralVariables(scale = zoomScale) {
+  const safeScale = Math.max(0.001, Number(scale) || zoomScale || 1);
+  const gridLinePx = clamp(1 / safeScale, 1, 1 / minimumZoom());
   els.roadmap.style.setProperty("--gridLine", `${gridLinePx.toFixed(2)}px`);
   els.roadmap.style.setProperty("--monthGridLine", `${(gridLinePx * 2).toFixed(2)}px`);
 }
@@ -3133,26 +3130,9 @@ function processMobileZoomStyleFrame() {
 
   // Every entry in this job is known to need an actual DOM change. Planning is
   // read-only (inline style/class/text state only), so unchanged zoom states do not
-  // create a multi-second chain of empty animation frames.
-  if (job.verticalIndex < job.verticalLines.length || job.horizontalIndex < job.horizontalLines.length) {
-    let structuralRemaining = 12;
-    while (structuralRemaining > 0 && job.verticalIndex < job.verticalLines.length) {
-      const line = job.verticalLines[job.verticalIndex++];
-      const width = line.classList.contains("month") ? job.monthGridLine : job.gridLine;
-      if (line?.isConnected) line.style.width = width;
-      structuralRemaining -= 1;
-    }
-    while (structuralRemaining > 0 && job.horizontalIndex < job.horizontalLines.length) {
-      const line = job.horizontalLines[job.horizontalIndex++];
-      if (line?.isConnected) line.style.height = job.gridLine;
-      structuralRemaining -= 1;
-    }
-    if (job.verticalIndex < job.verticalLines.length || job.horizontalIndex < job.horizontalLines.length) {
-      scheduleMobileZoomStyleSlice();
-      return;
-    }
-  }
-
+  // create a multi-second chain of empty animation frames. Structural grid widths
+  // are handled as two roadmap-scoped CSS variables at zoom commit, never as a
+  // per-line post-gesture sweep.
   if (job.cardIndex < job.cardEntries.length) {
     const cardLimit = Math.min(job.cardEntries.length, job.cardIndex + 6);
     while (job.cardIndex < cardLimit) {
@@ -3192,9 +3172,7 @@ function processMobileZoomStyleFrame() {
   }
 
   if (
-    job.verticalIndex < job.verticalLines.length
-    || job.horizontalIndex < job.horizontalLines.length
-    || job.cardIndex < job.cardEntries.length
+    job.cardIndex < job.cardEntries.length
     || job.metaIndex < job.metaEntries.length
     || job.textIndex < job.textTargets.length
   ) {
@@ -3207,25 +3185,9 @@ function scheduleMobileZoomStyleWork(scale = zoomScale) {
   if (!isMobileTouchViewport() || !els.roadmap) return;
   cancelMobileZoomStyleWork();
   const generation = mobileZoomStyleGeneration;
-  const gridLinePx = clamp(1 / scale, 1, 1 / minimumZoom());
-  const gridLine = `${gridLinePx.toFixed(2)}px`;
-  const monthGridLine = `${(gridLinePx * 2).toFixed(2)}px`;
   const textBoost = legibleTextScale(scale).toFixed(3);
   const barBoost = barLabelTextScale(scale).toFixed(3);
   const viewport = mobileSemanticViewportRect(scale);
-
-  const verticalLines = mobileGridVerticalCache.filter(line => {
-    if (!line?.isConnected) return false;
-    const x = Number.parseFloat(line.style.left) || 0;
-    if (x < viewport.left || x > viewport.right) return false;
-    const desired = line.classList.contains("month") ? monthGridLine : gridLine;
-    return line.style.width !== desired;
-  });
-  const horizontalLines = mobileGridHorizontalCache.filter(line => {
-    if (!line?.isConnected) return false;
-    const y = Number.parseFloat(line.style.top) || 0;
-    return y >= viewport.top && y <= viewport.bottom && line.style.height !== gridLine;
-  });
 
   const cardEntries = [];
   forEachVisibleMobileCardEntry(viewport, ({ unit, card }) => {
@@ -3260,12 +3222,6 @@ function scheduleMobileZoomStyleWork(scale = zoomScale) {
   mobileZoomStyleJob = {
     generation,
     scale,
-    gridLine,
-    monthGridLine,
-    verticalLines,
-    verticalIndex: 0,
-    horizontalLines,
-    horizontalIndex: 0,
     textBoost,
     barBoost,
     cardEntries,
@@ -3276,9 +3232,7 @@ function scheduleMobileZoomStyleWork(scale = zoomScale) {
     textIndex: 0
   };
   if (
-    !verticalLines.length
-    && !horizontalLines.length
-    && !cardEntries.length
+    !cardEntries.length
     && !metaEntries.length
     && !textTargets.length
   ) {
@@ -3289,9 +3243,9 @@ function scheduleMobileZoomStyleWork(scale = zoomScale) {
 }
 function applyZoomSemanticVariables() {
   if (isMobileTouchViewport()) {
-    // Mobile shares the desktop structural grid markup. Its visible line widths are
-    // reconciled by the existing local/cancellable style job after the pinch settles,
-    // keeping the live gesture free of grid DOM/style mutations.
+    // Mobile shares the desktop structural grid markup and updates its two structural
+    // widths in one roadmap-scoped write. Keep card/text/meta polish local/cancellable.
+    applyZoomStructuralVariables();
     return;
   }
   els.roadmap.style.setProperty("--textBoost", legibleTextScale().toFixed(3));
@@ -3878,8 +3832,6 @@ function rebuildMobileStaticPresentationIndex() {
     mobileCardSpatialMarginX = 0;
     mobileCardSpatialMarginY = 0;
     mobileSemanticRectCache = new WeakMap();
-    mobileGridVerticalCache = [];
-    mobileGridHorizontalCache = [];
     mobileCardNameMetricsById.clear();
     return;
   }
@@ -3908,8 +3860,6 @@ function rebuildMobileStaticPresentationIndex() {
   rebuildMobileCardSpatialIndex();
   mobileSemanticRectCache = new WeakMap();
   for (const element of mobileTextBoostTargetsCache) mobileSemanticElementRect(element);
-  mobileGridVerticalCache = Array.from(els.roadmap.querySelectorAll(".grid-line.v"));
-  mobileGridHorizontalCache = Array.from(els.roadmap.querySelectorAll(".grid-line.h"));
   rebuildMobileCardPresentationMetrics();
 }
 
@@ -5263,6 +5213,7 @@ function commitWebKitNativePinchVisual(nextZoom, targetScrollLeft, targetScrollT
     mobileStageShrinkPending = zoomScale < mobileStageGeometryScale - 0.0001;
   }
 
+  applyZoomStructuralVariables(zoomScale);
   els.chartScroll.scrollLeft = targetScrollLeft;
   els.chartScroll.scrollTop = targetScrollTop;
   if (Math.abs(previousZoom - zoomScale) > 0.0001) touchZoomSemanticDirty = true;
@@ -5290,6 +5241,7 @@ function commitTouchPinchVisual() {
   clearTouchStageTransform();
   zoomScale = nextZoom;
   applyZoomGeometry();
+  applyZoomStructuralVariables(zoomScale);
   els.chartScroll.scrollLeft = targetScrollLeft;
   els.chartScroll.scrollTop = targetScrollTop;
   markTouchZoomSemanticDirty();
