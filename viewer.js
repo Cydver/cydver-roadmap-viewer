@@ -26,6 +26,8 @@ const MOBILE_MIN_ZOOM = 0.02;
 const TEXT_SCALE_MIN_ZOOM = 0.2;
 const MAX_ZOOM = 1.6;
 const ZOOM_BUTTON_STEP = 0.05;
+const DESKTOP_WHEEL_ZOOM_DURATION_MS = 120;
+const DESKTOP_WHEEL_LINE_PX = 32;
 const TIER_LABEL_ABBREVIATIONS = { human: "HR", must: "MP", ideal: "IP", luxury: "LP", skip: "S" };
 const CARD_DETAILS_MIN_VISUAL_SIZE = 56;
 const CARD_TAGS_MIN_BOTTOM_GAP = 2;
@@ -82,7 +84,11 @@ let metaOwnerElementIndex = new Map();
 const profileImageWarmCache = new Map();
 let mobileCardNameMetricsById = new Map();
 let profileImageWarmupGeneration = 0;
+const desktopRecentProfileImageSources = [];
+const DESKTOP_RECENT_PROFILE_IMAGE_LIMIT = 8;
 let zoomScale = 1;
+let desktopWheelZoomAnimation = null;
+let desktopWheelZoomFrame = 0;
 let activeUnitId = null;
 const activeMetaStatusFilters = new Set();
 const activeMetaUnitFilters = new Set();
@@ -231,10 +237,10 @@ function ensureProfileImageWarmEntry(url, priority = "auto") {
   return entry;
 }
 
-async function decodeProfileWarmEntry(entry) {
-  if (!entry || entry.ready || entry.failed) return;
+async function decodeProfileWarmEntry(entry, { force = false } = {}) {
+  if (!entry || entry.failed || (!force && entry.ready)) return;
   if (entry.decodePromise) return entry.decodePromise;
-  entry.decodePromise = (async () => {
+  const promise = (async () => {
     try {
       if (typeof entry.img.decode === "function") await entry.img.decode();
       else if (!entry.img.complete) await new Promise((resolve, reject) => {
@@ -244,13 +250,46 @@ async function decodeProfileWarmEntry(entry) {
       entry.ready = entry.img.naturalWidth > 0;
       entry.failed = !entry.ready;
     } catch {
-      entry.failed = true;
+      // A decode can be interrupted when a document is backgrounded. Keep a
+      // previously loaded resource retryable instead of permanently poisoning it.
+      if (!entry.img.complete || !entry.img.naturalWidth) entry.failed = true;
+      entry.ready = Boolean(entry.img.complete && entry.img.naturalWidth > 0);
     }
   })();
-  return entry.decodePromise;
+  entry.decodePromise = promise;
+  try {
+    return await promise;
+  } finally {
+    if (entry.decodePromise === promise) entry.decodePromise = null;
+  }
 }
 
-function startProfileImageWarmup() {
+function rememberDesktopProfileImageSource(url) {
+  if (isMobileTouchViewport()) return;
+  const src = String(url || "").trim();
+  if (!src) return;
+  const index = desktopRecentProfileImageSources.indexOf(src);
+  if (index >= 0) desktopRecentProfileImageSources.splice(index, 1);
+  desktopRecentProfileImageSources.unshift(src);
+  if (desktopRecentProfileImageSources.length > DESKTOP_RECENT_PROFILE_IMAGE_LIMIT) {
+    desktopRecentProfileImageSources.length = DESKTOP_RECENT_PROFILE_IMAGE_LIMIT;
+  }
+}
+
+function refreshDesktopProfileImageDecodes() {
+  if (isMobileTouchViewport() || document.hidden) return;
+
+  // Re-establish the most recently used decoded surfaces immediately after a tab
+  // becomes active again. Browsers are allowed to evict decoded image data while
+  // backgrounded even when the encoded resource remains cached.
+  for (const src of desktopRecentProfileImageSources) {
+    const entry = profileImageWarmCache.get(src);
+    if (entry) decodeProfileWarmEntry(entry, { force: true });
+  }
+  startProfileImageWarmup({ force: true });
+}
+
+function startProfileImageWarmup({ force = false } = {}) {
   const generation = ++profileImageWarmupGeneration;
 
   // Roadmap card images already populate the browser image cache. On coarse-pointer
@@ -268,7 +307,7 @@ function startProfileImageWarmup() {
     const worker = async () => {
       while (generation === profileImageWarmupGeneration && cursor < entries.length) {
         const entry = entries[cursor++];
-        await decodeProfileWarmEntry(entry);
+        await decodeProfileWarmEntry(entry, { force });
       }
     };
     const concurrency = Math.min(4, entries.length);
@@ -282,13 +321,15 @@ function startProfileImageWarmup() {
   }
 }
 
-function warmProfilePairImages(unit, priority = "high") {
+function warmProfilePairImages(unit, priority = "high", { force = false } = {}) {
   if (!unit) return;
   const ms = isMs(unit) ? unit : pairedMsForPilot(unit);
   const pilot = isPilot(unit) ? unit : pairedPilotForMs(unit);
   for (const candidate of [ms, pilot]) {
-    const entry = ensureProfileImageWarmEntry(candidate?.icon, priority);
-    if (entry) decodeProfileWarmEntry(entry);
+    const src = String(candidate?.icon || "").trim();
+    const entry = ensureProfileImageWarmEntry(src, priority);
+    if (entry) decodeProfileWarmEntry(entry, { force });
+    rememberDesktopProfileImageSource(src);
   }
 }
 
@@ -533,13 +574,27 @@ function bindControls() {
   window.addEventListener("pointermove", moveTouchGesture, { passive: false });
   window.addEventListener("pointerup", endTouchGesture);
   window.addEventListener("pointercancel", endTouchGesture);
-  window.addEventListener("blur", () => recoverInterruptedPointerInteractions({ schedulePresentation: false }));
+  window.addEventListener("blur", () => {
+    finishDesktopWheelZoomAnimation();
+    recoverInterruptedPointerInteractions({ schedulePresentation: false });
+  });
   window.addEventListener("focus", maybeScheduleDeferredTouchZoomPresentation);
-  window.addEventListener("pagehide", () => recoverInterruptedPointerInteractions({ schedulePresentation: false }));
-  window.addEventListener("pageshow", maybeScheduleDeferredTouchZoomPresentation);
+  window.addEventListener("pagehide", () => {
+    finishDesktopWheelZoomAnimation();
+    recoverInterruptedPointerInteractions({ schedulePresentation: false });
+  });
+  window.addEventListener("pageshow", () => {
+    maybeScheduleDeferredTouchZoomPresentation();
+    refreshDesktopProfileImageDecodes();
+  });
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) recoverInterruptedPointerInteractions({ schedulePresentation: false });
-    else maybeScheduleDeferredTouchZoomPresentation();
+    if (document.hidden) {
+      finishDesktopWheelZoomAnimation();
+      recoverInterruptedPointerInteractions({ schedulePresentation: false });
+    } else {
+      maybeScheduleDeferredTouchZoomPresentation();
+      refreshDesktopProfileImageDecodes();
+    }
   });
   window.addEventListener("resize", handleViewerViewportResize);
   window.visualViewport?.addEventListener("resize", handleViewerVisualViewportResize);
@@ -1159,7 +1214,7 @@ function renderUnit(unit) {
     // The roadmap artwork is already resident in the browser image cache on mobile.
     // Starting a second explicit decode at the exact moment the user opens a profile
     // only creates competing work; desktop retains its existing proactive warmup.
-    if (!isMobileTouchViewport()) warmProfilePairImages(unit);
+    if (!isMobileTouchViewport()) warmProfilePairImages(unit, "high", { force: true });
   }, { passive: true });
   const activateCard = event => {
     const directTouch = event?.type === "pointerup" && event.pointerType === "touch";
@@ -1854,12 +1909,50 @@ function bindProfileTagTooltips(root) {
 
 function profileArtHtml(unit, typeLabel) {
   if (!unit) return `<div class="unit-profile-art empty"><div class="unit-profile-placeholder">?</div><span>${escapeHtml(typeLabel)}</span></div>`;
-  const warmed = unit.icon ? profileImageWarmCache.get(String(unit.icon).trim()) : null;
-  const decoding = !isMobileTouchViewport() && warmed?.ready ? "sync" : "async";
+  if (unit.icon && !isMobileTouchViewport()) {
+    // Desktop reuses the exact warmed HTMLImageElement instead of creating a new
+    // image node every time the profile shell/content is rebuilt. The fallback
+    // stays in markup so first-load/error behavior is unchanged.
+    return `<div class="unit-profile-art" data-profile-image-src="${escapeAttr(unit.icon)}" data-profile-image-alt="${escapeAttr(unit.name)}"><div class="unit-profile-placeholder image-fallback">${escapeHtml(initials(unit.name))}</div></div>`;
+  }
   const image = unit.icon
-    ? `<img class="unit-profile-image" src="${escapeAttr(unit.icon)}" alt="${escapeAttr(unit.name)}" width="200" height="200" decoding="${decoding}" loading="eager" fetchpriority="high" crossorigin="anonymous"><div class="unit-profile-placeholder image-fallback">${escapeHtml(initials(unit.name))}</div>`
+    ? `<img class="unit-profile-image" src="${escapeAttr(unit.icon)}" alt="${escapeAttr(unit.name)}" width="200" height="200" decoding="async" loading="eager" fetchpriority="high" crossorigin="anonymous"><div class="unit-profile-placeholder image-fallback">${escapeHtml(initials(unit.name))}</div>`
     : `<div class="unit-profile-placeholder">${escapeHtml(initials(unit.name))}</div>`;
   return `<div class="unit-profile-art">${image}</div>`;
+}
+
+function hydrateDesktopProfileImages(root) {
+  if (isMobileTouchViewport()) return;
+  root?.querySelectorAll('.unit-profile-art[data-profile-image-src]').forEach(art => {
+    const src = String(art.dataset.profileImageSrc || "").trim();
+    if (!src) return;
+    const entry = ensureProfileImageWarmEntry(src, "high");
+    if (!entry) return;
+    rememberDesktopProfileImageSource(src);
+
+    let img = entry.img;
+    // A unit icon should normally appear only once in the paired profile. Keep a
+    // safe fallback for malformed data without stealing a connected node.
+    if (img.isConnected && img.parentElement !== art) {
+      img = img.cloneNode(false);
+      img.src = src;
+    }
+    img.className = "unit-profile-image";
+    img.alt = art.dataset.profileImageAlt || "";
+    img.width = 200;
+    img.height = 200;
+    img.draggable = false;
+    img.loading = "eager";
+    img.decoding = entry.ready ? "sync" : "async";
+    img.crossOrigin = "anonymous";
+    try { img.fetchPriority = "high"; } catch {}
+    img.style.display = entry.failed ? "none" : "";
+
+    const fallback = art.querySelector(".unit-profile-placeholder");
+    if (fallback) fallback.classList.toggle("image-fallback", !entry.failed);
+    art.insertBefore(img, art.firstChild);
+    if (!entry.ready) decodeProfileWarmEntry(entry);
+  });
 }
 
 
@@ -2365,6 +2458,7 @@ function updateUnitProfileContent(overlay, unitId, activeSegmentId = null) {
   // state and unpredictable memory/paint pressure after several rapid profiles.
   grid.className = unitProfileGridClass(ms);
   grid.innerHTML = unitProfileGridHtml(ms, pilot, activeId);
+  hydrateDesktopProfileImages(grid);
   bindUnitProfileImageFallbacks(grid);
   if (card) card.scrollTop = 0;
 
@@ -2883,7 +2977,132 @@ function applyMobileCameraTransform(x = mobileCameraX, y = mobileCameraY, scale 
   els.chartStage.style.transform = `translate3d(${mobileCameraX}px, ${mobileCameraY}px, 0) scale(${scale})`;
 }
 
+function normalizedDesktopWheelDeltaY(event) {
+  let delta = Number(event?.deltaY) || 0;
+  if (event?.deltaMode === 1) delta *= DESKTOP_WHEEL_LINE_PX;
+  else if (event?.deltaMode === 2) delta *= Math.max(240, els.chartScroll?.clientHeight || window.innerHeight || 800);
+  return clamp(delta, -240, 240);
+}
+
+function desktopWheelPreviewGeometry(animation, previewZoom) {
+  const ratio = previewZoom / animation.startZoom;
+  const maxScrollLeft = Math.max(0, animation.baseWidth * previewZoom - animation.viewportWidth);
+  const maxScrollTop = Math.max(0, animation.baseHeight * previewZoom - animation.viewportHeight);
+  const targetScrollLeft = clamp(animation.anchorStageX * ratio - animation.localX, 0, maxScrollLeft);
+  const targetScrollTop = clamp(animation.anchorStageY * ratio - animation.localY, 0, maxScrollTop);
+  return {
+    ratio,
+    targetScrollLeft,
+    targetScrollTop,
+    translateX: animation.startScrollLeft - targetScrollLeft,
+    translateY: animation.startScrollTop - targetScrollTop
+  };
+}
+
+function applyDesktopWheelZoomPreview(animation, previewZoom) {
+  if (!animation || isMobileTouchViewport()) return;
+  const geometry = desktopWheelPreviewGeometry(animation, previewZoom);
+  animation.previewZoom = previewZoom;
+  animation.previewScrollLeft = geometry.targetScrollLeft;
+  animation.previewScrollTop = geometry.targetScrollTop;
+  els.chartStage.style.transform = `translate3d(${geometry.translateX}px, ${geometry.translateY}px, 0) scale(${geometry.ratio})`;
+  // Keep the structural lines visually constant while the cheap stage preview
+  // interpolates between committed desktop zoom states.
+  applyZoomStructuralVariables(previewZoom);
+  if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(previewZoom * 100)}%`;
+}
+
+function finishDesktopWheelZoomAnimation() {
+  const animation = desktopWheelZoomAnimation;
+  if (!animation) return;
+  if (desktopWheelZoomFrame) {
+    cancelAnimationFrame(desktopWheelZoomFrame);
+    desktopWheelZoomFrame = 0;
+  }
+  desktopWheelZoomAnimation = null;
+  const finalZoom = clamp(Number(animation.targetZoom) || animation.startZoom, minimumZoom(), MAX_ZOOM);
+  const geometry = desktopWheelPreviewGeometry(animation, finalZoom);
+  zoomScale = finalZoom;
+  applyZoomGeometry();
+  els.chartScroll.scrollLeft = geometry.targetScrollLeft;
+  els.chartScroll.scrollTop = geometry.targetScrollTop;
+  applyZoomSemanticPresentation();
+}
+
+function stepDesktopWheelZoomAnimation(now) {
+  desktopWheelZoomFrame = 0;
+  const animation = desktopWheelZoomAnimation;
+  if (!animation) return;
+  const duration = Math.max(1, DESKTOP_WHEEL_ZOOM_DURATION_MS);
+  const t = clamp((now - animation.startedAt) / duration, 0, 1);
+  const eased = 1 - Math.pow(1 - t, 3);
+  const previewZoom = animation.fromZoom + (animation.targetZoom - animation.fromZoom) * eased;
+  applyDesktopWheelZoomPreview(animation, previewZoom);
+  if (t >= 1) {
+    finishDesktopWheelZoomAnimation();
+    return;
+  }
+  desktopWheelZoomFrame = requestAnimationFrame(stepDesktopWheelZoomAnimation);
+}
+
+function queueDesktopWheelZoom(targetZoom, clientX, clientY) {
+  const rect = els.chartScroll.getBoundingClientRect();
+  const localX = clientX - rect.left;
+  const localY = clientY - rect.top;
+  const now = performance.now();
+  let animation = desktopWheelZoomAnimation;
+
+  if (!animation) {
+    animation = {
+      startZoom: zoomScale,
+      fromZoom: zoomScale,
+      previewZoom: zoomScale,
+      targetZoom: zoomScale,
+      startScrollLeft: els.chartScroll.scrollLeft,
+      startScrollTop: els.chartScroll.scrollTop,
+      localX,
+      localY,
+      anchorStageX: els.chartScroll.scrollLeft + localX,
+      anchorStageY: els.chartScroll.scrollTop + localY,
+      viewportWidth: els.chartScroll.clientWidth,
+      viewportHeight: els.chartScroll.clientHeight,
+      baseWidth: baseChartWidth(),
+      baseHeight: baseChartHeight(),
+      startedAt: now
+    };
+    desktopWheelZoomAnimation = animation;
+  } else {
+    // Preserve the content point under a moved cursor without committing the
+    // intermediate preview. This keeps a long wheel gesture on the cheap stage
+    // transform path until the final semantic commit.
+    const current = desktopWheelPreviewGeometry(animation, animation.previewZoom);
+    const currentRatio = Math.max(0.0001, current.ratio);
+    animation.anchorStageX = (localX + animation.startScrollLeft - current.translateX) / currentRatio;
+    animation.anchorStageY = (localY + animation.startScrollTop - current.translateY) / currentRatio;
+    animation.localX = localX;
+    animation.localY = localY;
+  }
+
+  animation.fromZoom = animation.previewZoom;
+  animation.targetZoom = clamp(targetZoom, minimumZoom(), MAX_ZOOM);
+  animation.startedAt = now;
+  if (!desktopWheelZoomFrame) desktopWheelZoomFrame = requestAnimationFrame(stepDesktopWheelZoomAnimation);
+}
+
+function cancelDesktopWheelZoomAnimation() {
+  if (!desktopWheelZoomAnimation) return;
+  if (desktopWheelZoomFrame) {
+    cancelAnimationFrame(desktopWheelZoomFrame);
+    desktopWheelZoomFrame = 0;
+  }
+  desktopWheelZoomAnimation = null;
+  els.chartStage.style.transform = "";
+  applyZoomStructuralVariables(zoomScale);
+  if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
+}
+
 function setZoom(value) {
+  cancelDesktopWheelZoomAnimation();
   zoomScale = clamp(Math.round(Number(value || 1) * 100) / 100, minimumZoom(), MAX_ZOOM);
   applyZoom();
 }
@@ -2917,8 +3136,13 @@ function handleWheelZoom(event) {
   if (!event.deltaY) return;
   event.preventDefault();
   event.stopPropagation();
-  const delta = clamp(event.deltaY, -200, 200);
+  const delta = normalizedDesktopWheelDeltaY(event);
   const factor = Math.exp(-delta * 0.0005);
+  if (!isMobileTouchViewport()) {
+    const baseZoom = desktopWheelZoomAnimation?.targetZoom ?? zoomScale;
+    queueDesktopWheelZoom(baseZoom * factor, event.clientX, event.clientY);
+    return;
+  }
   setZoomAtClientPoint(zoomScale * factor, event.clientX, event.clientY);
 }
 
