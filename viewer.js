@@ -57,8 +57,6 @@ const BAR_BOTTOM_PAD = 34;
 const MOBILE_CARD_SPATIAL_BUCKET_SIZE = 480;
 const MOBILE_META_DIMMER_OVERSCAN_PX = 96;
 const MOBILE_META_DIMMER_GUARD_PX = 32;
-const MOBILE_GRID_MINOR_SCREEN_PX = 1.3;
-const MOBILE_GRID_MONTH_SCREEN_PX = 2.4;
 
 const DEFAULT_STATE = {
   updated: "",
@@ -157,7 +155,6 @@ let mobileCardSpatialMarginY = 0;
 let mobileSemanticRectCache = new WeakMap();
 let mobileGridVerticalCache = [];
 let mobileGridHorizontalCache = [];
-let mobileVectorGridEl = null;
 let mobileTouchMediaQuery = null;
 let unitProfileBindingGeneration = 0;
 let unitProfileBindingFrame = 0;
@@ -979,7 +976,6 @@ function renderChart() {
   captureRoadmapImagesForRender();
   const width = baseChartWidth();
   const height = baseChartHeight();
-  mobileVectorGridEl = null;
   els.roadmap.innerHTML = "";
   els.roadmap.style.width = `${width}px`;
   els.roadmap.style.height = `${height}px`;
@@ -1030,19 +1026,19 @@ function renderChart() {
     monthBoundaries.add(next);
     return next;
   }, 0);
-  if (isMobileTouchViewport()) {
-    addMobileVectorGrid(width, height, monthBoundaries);
-  } else {
-    for (let w = 0; w <= weekCount(); w++) {
-      const line = addDiv(`grid-line v${monthBoundaries.has(w) ? " month" : ""}`, {
-        left: `${weekBoundaryX(w)}px`
-      });
-      line.style.height = monthBoundaries.has(w) ? "100%" : `${height - HEADER_H}px`;
-    }
-
-    getTiers().forEach(tier => addDiv("grid-line h", { top: `${tierY(tier.id)}px` }));
-    addDiv("grid-line h", { top: `${height}px` });
+  // Use the same structural grid markup on desktop and mobile. The older smooth
+  // iPhone path used these exact div lines too; mobile keeps their width updates
+  // in the existing settled/visible-only semantic job instead of touching them
+  // during a live pinch.
+  for (let w = 0; w <= weekCount(); w++) {
+    const line = addDiv(`grid-line v${monthBoundaries.has(w) ? " month" : ""}`, {
+      left: `${weekBoundaryX(w)}px`
+    });
+    line.style.height = monthBoundaries.has(w) ? "100%" : `${height - HEADER_H}px`;
   }
+
+  getTiers().forEach(tier => addDiv("grid-line h", { top: `${tierY(tier.id)}px` }));
+  addDiv("grid-line h", { top: `${height}px` });
 
   getTiers().forEach(tier => {
     for (let lane = 1; lane <= visibleLaneCount(tier.id); lane++) {
@@ -2812,62 +2808,6 @@ function addDiv(className, style = {}) {
   return el;
 }
 
-function addMobileVectorGrid(width, height, monthBoundaries) {
-  const svgNs = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(svgNs, "svg");
-  svg.classList.add("grid-vector-layer");
-  svg.setAttribute("width", String(width));
-  svg.setAttribute("height", String(height));
-  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  svg.setAttribute("preserveAspectRatio", "none");
-  svg.setAttribute("aria-hidden", "true");
-  svg.setAttribute("focusable", "false");
-
-  const minorSegments = [];
-  const monthSegments = [];
-  for (let w = 0; w <= weekCount(); w++) {
-    const x = weekBoundaryX(w);
-    const target = monthBoundaries.has(w) ? monthSegments : minorSegments;
-    target.push(`M ${x} ${monthBoundaries.has(w) ? 0 : HEADER_H} V ${height}`);
-  }
-  getTiers().forEach(tier => {
-    const y = tierY(tier.id);
-    minorSegments.push(`M 0 ${y} H ${width}`);
-  });
-  minorSegments.push(`M 0 ${height} H ${width}`);
-
-  const addPath = (className, segments) => {
-    if (!segments.length) return;
-    const path = document.createElementNS(svgNs, "path");
-    path.setAttribute("class", className);
-    path.setAttribute("d", segments.join(" "));
-    svg.appendChild(path);
-  };
-  // Keep the mobile grid to two batched paths, but leave them as ordinary scaling
-  // SVG strokes during a live pinch. WebKit performs specialized path/bounds work
-  // for non-scaling-stroke under a changing scale ancestor, which is exactly the
-  // large-surface pinch case we need to avoid. Stable zoom states restore the same
-  // screen-space line hierarchy with two settled-only custom properties below.
-  addPath("grid-vector-line minor", minorSegments);
-  addPath("grid-vector-line month", monthSegments);
-  els.roadmap.appendChild(svg);
-  mobileVectorGridEl = svg;
-  syncMobileVectorGridStrokeScale(zoomScale);
-}
-
-function syncMobileVectorGridStrokeScale(scale = zoomScale) {
-  if (!mobileVectorGridEl || !isMobileTouchViewport()) return;
-  const safeScale = Math.max(0.001, Number(scale) || 1);
-  mobileVectorGridEl.style.setProperty(
-    "--mobile-grid-minor-stroke",
-    (MOBILE_GRID_MINOR_SCREEN_PX / safeScale).toFixed(4)
-  );
-  mobileVectorGridEl.style.setProperty(
-    "--mobile-grid-month-stroke",
-    (MOBILE_GRID_MONTH_SCREEN_PX / safeScale).toFixed(4)
-  );
-}
-
 function isMobileTouchViewport() {
   if (!mobileTouchMediaQuery && typeof window.matchMedia === "function") {
     mobileTouchMediaQuery = window.matchMedia("(pointer: coarse)");
@@ -2970,7 +2910,6 @@ function applyZoomGeometry() {
     els.chartStage.style.width = `${width * zoomScale}px`;
     els.chartStage.style.height = `${height * zoomScale}px`;
   }
-  syncMobileVectorGridStrokeScale(zoomScale);
   mobileStageGeometryScale = zoomScale;
   if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
 }
@@ -3350,8 +3289,9 @@ function scheduleMobileZoomStyleWork(scale = zoomScale) {
 }
 function applyZoomSemanticVariables() {
   if (isMobileTouchViewport()) {
-    // Mobile structural grid is static vector paint. Semantic/card work remains
-    // local and cancellable; no grid writes are needed during or after a pinch.
+    // Mobile shares the desktop structural grid markup. Its visible line widths are
+    // reconciled by the existing local/cancellable style job after the pinch settles,
+    // keeping the live gesture free of grid DOM/style mutations.
     return;
   }
   els.roadmap.style.setProperty("--textBoost", legibleTextScale().toFixed(3));
@@ -5073,12 +5013,6 @@ function clearTouchStageTransform() {
     return;
   }
   els.chartStage.style.transform = "";
-  // Native WebKit pinch previews now reuse the roadmap's existing zoom transform
-  // instead of adding a second transformed ancestor on chartStage. Restore the
-  // steady-state roadmap scale whenever that temporary preview is cleared.
-  if (useWebKitNativeGestureInput && els.roadmap) {
-    els.roadmap.style.transform = `scale(${zoomScale})`;
-  }
 }
 function scheduleTouchGestureFrame() {
   if (touchGestureFrame) return;
@@ -5140,19 +5074,10 @@ function applyPinchPreviewFrame(frame, { visual = true } = {}) {
     pinchGesture.viewportWidth,
     pinchGesture.viewportHeight
   );
-  if (useWebKitNativeGestureInput) {
-    // The steady mobile layout already scales the whole roadmap. Do not add a
-    // second transformed ancestor during native pinch: that creates a nested
-    // transform/raster hierarchy across the entire scrollable map. Applying the
-    // mathematically equivalent absolute transform to the existing roadmap layer
-    // keeps one live transformed surface while chartStage remains pure scroll
-    // geometry. The exact stage extent and scroll position still commit on lift.
-    els.chartStage.style.transform = "";
-    els.roadmap.style.transform = `translate(${translateX}px, ${translateY}px) scale(${nextZoom})`;
-  } else {
-    // The standards-based Pointer Events fallback retains its established preview.
-    els.chartStage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0) scale(${ratio})`;
-  }
+  // Match the older smooth iPhone/desktop rendering model: the roadmap keeps its
+  // already-committed scale and live pinch is one compositor preview on chartStage.
+  // No grid/style/layout mutation occurs in this path.
+  els.chartStage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0) scale(${ratio})`;
   if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(nextZoom * 100)}%`;
 }
 function flushTouchGestureFrame() {
@@ -5334,7 +5259,6 @@ function commitWebKitNativePinchVisual(nextZoom, targetScrollLeft, targetScrollT
   } else {
     els.chartStage.style.transform = "";
     els.roadmap.style.transform = `scale(${zoomScale})`;
-    syncMobileVectorGridStrokeScale(zoomScale);
     if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
     mobileStageShrinkPending = zoomScale < mobileStageGeometryScale - 0.0001;
   }

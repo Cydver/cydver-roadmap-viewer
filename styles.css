@@ -4573,13 +4573,6 @@ body {
     will-change: transform;
     backface-visibility: hidden;
   }
-  /* Native WebKit pinch uses a 2D transform and deliberately avoids explicit
-     promotion of the enormous roadmap surface. Keep the existing promoted path
-     for the Pointer Events fallback only. */
-  .chart-scroll.webkit-native-gesture-input.touch-gesturing .chart-stage {
-    will-change: auto;
-    backface-visibility: visible;
-  }
 }
 
 .unit-profile-release-source {
@@ -4762,33 +4755,10 @@ body {
   }
 }
 
-/* --- Mobile baseline polish: edge-safe profile navigation + static vector grid --- */
-.grid-vector-layer {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  overflow: visible;
-  pointer-events: none;
-}
-.grid-vector-line {
-  fill: none;
-  vector-effect: none;
-  shape-rendering: crispEdges;
-  stroke-linecap: butt;
-  pointer-events: none;
-}
-/* A 1px SVG stroke reads lighter than the filled desktop div on Retina/WebKit.
-   Stroke widths are inverse-scaled only at settled zoom states, preserving the
-   minor/month hierarchy without non-scaling-stroke work during live pinch. */
-.grid-vector-line.minor {
-  stroke: rgba(255,255,255,.18);
-  stroke-width: var(--mobile-grid-minor-stroke, 1.3);
-}
-.grid-vector-line.month {
-  stroke: rgba(255,255,255,.31);
-  stroke-width: var(--mobile-grid-month-stroke, 2.4);
-}
+/* --- Mobile baseline polish: edge-safe profile navigation + desktop-parity grid --- */
+/* Structural grid lines intentionally use the shared .grid-line rules above on
+   every platform. Mobile adjusts only visible line thickness after zoom settles;
+   the live pinch itself performs no grid DOM/style writes. */
 
 @media (pointer: coarse) {
   /* Compact touch chrome keeps the amber accent integrated into the surface
