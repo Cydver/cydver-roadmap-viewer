@@ -5083,14 +5083,21 @@ function applyPinchPreviewFrame(frame) {
   const targetScrollTop = clamp(pinchGesture.anchorStageY * ratio - localY, 0, maxScrollTop);
   const translateX = pinchGesture.startScrollLeft - targetScrollLeft;
   const translateY = pinchGesture.startScrollTop - targetScrollTop;
-  // The transform + label write below stay synchronous on every call, including
-  // every native WebKit gesturechange event (which is not itself capped to the
-  // screen's refresh rate), so pinch tracking keeps its low-latency feel. The
-  // card-detail/dimmer bookkeeping below is comparatively expensive (it walks
-  // every currently-visible card) and has no visible benefit running more than
-  // once per painted frame, so it is coalesced to a single rAF pass instead of
-  // once per raw gesture event.
-  schedulePinchDetailPreview(
+  // Keep WebKit's native GestureEvent pinch compositor-only. The fallback
+  // Pointer Events path can keep its live card-density preview, but running that
+  // visible-card class sweep on every native gesturechange adds main-thread/style
+  // work to the exact iPhone path that otherwise needs only one transform write.
+  // The existing settled semantic pass reconciles card density after the burst.
+  if (!useWebKitNativeGestureInput) {
+    updateVisiblePinchCardDetailPreview(
+      nextZoom,
+      targetScrollLeft,
+      targetScrollTop,
+      pinchGesture.viewportWidth,
+      pinchGesture.viewportHeight
+    );
+  }
+  ensureMobileMetaFocusDimmerCoverage(
     nextZoom,
     targetScrollLeft,
     targetScrollTop,
@@ -5102,28 +5109,6 @@ function applyPinchPreviewFrame(frame) {
   pinchGesture.targetScrollLeft = targetScrollLeft;
   pinchGesture.targetScrollTop = targetScrollTop;
   if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(nextZoom * 100)}%`;
-}
-let pendingPinchDetailFrame = 0;
-let pendingPinchDetailArgs = null;
-function schedulePinchDetailPreview(scale, scrollLeft, scrollTop, viewportWidth, viewportHeight) {
-  pendingPinchDetailArgs = { scale, scrollLeft, scrollTop, viewportWidth, viewportHeight };
-  if (pendingPinchDetailFrame) return;
-  pendingPinchDetailFrame = requestAnimationFrame(flushPinchDetailPreview);
-}
-function flushPinchDetailPreview() {
-  pendingPinchDetailFrame = 0;
-  const args = pendingPinchDetailArgs;
-  pendingPinchDetailArgs = null;
-  if (!args || !pinchGesture) return;
-  updateVisiblePinchCardDetailPreview(args.scale, args.scrollLeft, args.scrollTop, args.viewportWidth, args.viewportHeight);
-  ensureMobileMetaFocusDimmerCoverage(args.scale, args.scrollLeft, args.scrollTop, args.viewportWidth, args.viewportHeight);
-}
-function cancelPendingPinchDetailPreview() {
-  if (pendingPinchDetailFrame) {
-    cancelAnimationFrame(pendingPinchDetailFrame);
-    pendingPinchDetailFrame = 0;
-  }
-  pendingPinchDetailArgs = null;
 }
 function flushTouchGestureFrame() {
   touchGestureFrame = 0;
@@ -5315,7 +5300,6 @@ function commitWebKitNativePinchVisual(nextZoom, targetScrollLeft, targetScrollT
 
 function commitTouchPinchVisual() {
   if (!pinchGesture) return;
-  cancelPendingPinchDetailPreview();
   flushPendingTouchGestureFrame();
   const nextZoom = clamp(Number(pinchGesture.finalZoom) || pinchGesture.startZoom, minimumZoom(), MAX_ZOOM);
   if (useMobileTransformCamera()) {
