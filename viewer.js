@@ -5090,13 +5090,21 @@ function applyPinchPreviewFrame(frame, { visual = true } = {}) {
   pinchGesture.targetScrollLeft = targetScrollLeft;
   pinchGesture.targetScrollTop = targetScrollTop;
   if (!visual) return;
-  updateVisiblePinchCardDetailPreview(
-    nextZoom,
-    targetScrollLeft,
-    targetScrollTop,
-    pinchGesture.viewportWidth,
-    pinchGesture.viewportHeight
-  );
+  // Keep WebKit's native GestureEvent pinch free of adaptive card-density DOM
+  // changes. Those class toggles occur at discrete visual-size thresholds and can
+  // invalidate style/paint across many visible cards while the giant stage is
+  // already being transformed. The Pointer Events fallback keeps its live density
+  // preview; native WebKit reconciles the exact card state in the existing settled
+  // semantic pass after the pinch burst.
+  if (!useWebKitNativeGestureInput) {
+    updateVisiblePinchCardDetailPreview(
+      nextZoom,
+      targetScrollLeft,
+      targetScrollTop,
+      pinchGesture.viewportWidth,
+      pinchGesture.viewportHeight
+    );
+  }
   ensureMobileMetaFocusDimmerCoverage(
     nextZoom,
     targetScrollLeft,
