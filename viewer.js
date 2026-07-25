@@ -3055,9 +3055,7 @@ function forEachVisibleMobileCardEntry(viewport, callback) {
   if (!viewport || typeof callback !== "function") return;
   if (!mobileCardSpatialBuckets.size) {
     for (const entry of mobileCardEntriesCache) {
-      if (mobileSemanticRectIntersects(entry?.rect, viewport)) {
-        if (callback(entry) === false) return;
-      }
+      if (mobileSemanticRectIntersects(entry?.rect, viewport)) callback(entry);
     }
     return;
   }
@@ -3070,28 +3068,14 @@ function forEachVisibleMobileCardEntry(viewport, callback) {
       const entries = mobileCardSpatialBuckets.get(mobileCardSpatialBucketKey(bucketX, bucketY));
       if (!entries) continue;
       for (const entry of entries) {
-        if (mobileSemanticRectIntersects(entry?.rect, viewport)) {
-          if (callback(entry) === false) return;
-        }
+        if (mobileSemanticRectIntersects(entry?.rect, viewport)) callback(entry);
       }
     }
   }
 }
-// Live pinch-preview card density writes are bounded per animation frame. Near
-// minimum zoom the whole roadmap can be visible at once, so the unbounded
-// version of this pass touched every card on every pinch frame (hundreds of
-// classList writes/frame), which is what produced the frame-by-frame choppiness
-// reported when pinching in from a fully-fit-to-screen map. Once the visible
-// set is small (typical zoomed-in pinching) this budget is never reached, so
-// that path is unchanged. Any cards skipped this frame are caught by the
-// existing settled/chunked reconciliation (scheduleMobileZoomStyleWork) once
-// the gesture ends, matching the accepted "live pinch can lag behind desktop
-// slightly, catch up after settle" tradeoff used elsewhere in this file.
-const MOBILE_PINCH_PREVIEW_CARD_BUDGET = 96;
 function updateVisiblePinchCardDetailPreview(scale, scrollLeft, scrollTop, viewportWidth, viewportHeight) {
   if (!isMobileTouchViewport() || !mobileCardEntriesCache.length) return;
   const viewport = mobilePinchPreviewViewportRect(scale, scrollLeft, scrollTop, viewportWidth, viewportHeight);
-  let budget = MOBILE_PINCH_PREVIEW_CARD_BUDGET;
   forEachVisibleMobileCardEntry(viewport, ({ unit, card }) => {
     if (!card?.isConnected) return;
     // This is deliberately limited to card density classes and only writes when
@@ -3099,8 +3083,6 @@ function updateVisiblePinchCardDetailPreview(scale, scrollLeft, scrollTop, viewp
     // geometry retain the proven settled-zoom path, so live reveal does not
     // recreate the old per-frame whole-roadmap semantic pass.
     applyUnitCardDetailToCard(card, mobileUnitCardDetailState(unit, scale));
-    budget -= 1;
-    if (budget <= 0) return false;
   });
 }
 function mobileSemanticRectIntersects(rect, viewport) {
@@ -5101,14 +5083,14 @@ function applyPinchPreviewFrame(frame) {
   const targetScrollTop = clamp(pinchGesture.anchorStageY * ratio - localY, 0, maxScrollTop);
   const translateX = pinchGesture.startScrollLeft - targetScrollLeft;
   const translateY = pinchGesture.startScrollTop - targetScrollTop;
-  updateVisiblePinchCardDetailPreview(
-    nextZoom,
-    targetScrollLeft,
-    targetScrollTop,
-    pinchGesture.viewportWidth,
-    pinchGesture.viewportHeight
-  );
-  ensureMobileMetaFocusDimmerCoverage(
+  // The transform + label write below stay synchronous on every call, including
+  // every native WebKit gesturechange event (which is not itself capped to the
+  // screen's refresh rate), so pinch tracking keeps its low-latency feel. The
+  // card-detail/dimmer bookkeeping below is comparatively expensive (it walks
+  // every currently-visible card) and has no visible benefit running more than
+  // once per painted frame, so it is coalesced to a single rAF pass instead of
+  // once per raw gesture event.
+  schedulePinchDetailPreview(
     nextZoom,
     targetScrollLeft,
     targetScrollTop,
@@ -5120,6 +5102,28 @@ function applyPinchPreviewFrame(frame) {
   pinchGesture.targetScrollLeft = targetScrollLeft;
   pinchGesture.targetScrollTop = targetScrollTop;
   if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(nextZoom * 100)}%`;
+}
+let pendingPinchDetailFrame = 0;
+let pendingPinchDetailArgs = null;
+function schedulePinchDetailPreview(scale, scrollLeft, scrollTop, viewportWidth, viewportHeight) {
+  pendingPinchDetailArgs = { scale, scrollLeft, scrollTop, viewportWidth, viewportHeight };
+  if (pendingPinchDetailFrame) return;
+  pendingPinchDetailFrame = requestAnimationFrame(flushPinchDetailPreview);
+}
+function flushPinchDetailPreview() {
+  pendingPinchDetailFrame = 0;
+  const args = pendingPinchDetailArgs;
+  pendingPinchDetailArgs = null;
+  if (!args || !pinchGesture) return;
+  updateVisiblePinchCardDetailPreview(args.scale, args.scrollLeft, args.scrollTop, args.viewportWidth, args.viewportHeight);
+  ensureMobileMetaFocusDimmerCoverage(args.scale, args.scrollLeft, args.scrollTop, args.viewportWidth, args.viewportHeight);
+}
+function cancelPendingPinchDetailPreview() {
+  if (pendingPinchDetailFrame) {
+    cancelAnimationFrame(pendingPinchDetailFrame);
+    pendingPinchDetailFrame = 0;
+  }
+  pendingPinchDetailArgs = null;
 }
 function flushTouchGestureFrame() {
   touchGestureFrame = 0;
@@ -5311,6 +5315,7 @@ function commitWebKitNativePinchVisual(nextZoom, targetScrollLeft, targetScrollT
 
 function commitTouchPinchVisual() {
   if (!pinchGesture) return;
+  cancelPendingPinchDetailPreview();
   flushPendingTouchGestureFrame();
   const nextZoom = clamp(Number(pinchGesture.finalZoom) || pinchGesture.startZoom, minimumZoom(), MAX_ZOOM);
   if (useMobileTransformCamera()) {
