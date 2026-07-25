@@ -4874,3 +4874,17 @@ body {
     min-height: 0;
   }
 }
+
+/* --- Native WebKit header text normalization ---
+   Safari on iOS can automatically enlarge text in wide desktop-style layouts.
+   The roadmap headers are absolutely positioned, so that mobile text autosizing
+   can make otherwise-correct CSS-zoom geometry look like overlapping/oversized
+   header text. Keep the authored desktop header metrics authoritative. */
+@media (pointer: coarse) {
+  .chart-scroll.webkit-css-zoom-pinch .month-head,
+  .chart-scroll.webkit-css-zoom-pinch .week-head,
+  .chart-scroll.webkit-css-zoom-pinch .tier-label {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+}
