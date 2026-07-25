@@ -4573,6 +4573,13 @@ body {
     will-change: transform;
     backface-visibility: hidden;
   }
+  /* Native WebKit pinch uses a 2D transform and deliberately avoids explicit
+     promotion of the enormous roadmap surface. Keep the existing promoted path
+     for the Pointer Events fallback only. */
+  .chart-scroll.webkit-native-gesture-input.touch-gesturing .chart-stage {
+    will-change: auto;
+    backface-visibility: visible;
+  }
 }
 
 .unit-profile-release-source {
