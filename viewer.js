@@ -57,6 +57,8 @@ const BAR_BOTTOM_PAD = 34;
 const MOBILE_CARD_SPATIAL_BUCKET_SIZE = 480;
 const MOBILE_META_DIMMER_OVERSCAN_PX = 96;
 const MOBILE_META_DIMMER_GUARD_PX = 32;
+const MOBILE_GRID_MINOR_SCREEN_PX = 1.3;
+const MOBILE_GRID_MONTH_SCREEN_PX = 2.4;
 
 const DEFAULT_STATE = {
   updated: "",
@@ -155,6 +157,7 @@ let mobileCardSpatialMarginY = 0;
 let mobileSemanticRectCache = new WeakMap();
 let mobileGridVerticalCache = [];
 let mobileGridHorizontalCache = [];
+let mobileVectorGridEl = null;
 let mobileTouchMediaQuery = null;
 let unitProfileBindingGeneration = 0;
 let unitProfileBindingFrame = 0;
@@ -976,6 +979,7 @@ function renderChart() {
   captureRoadmapImagesForRender();
   const width = baseChartWidth();
   const height = baseChartHeight();
+  mobileVectorGridEl = null;
   els.roadmap.innerHTML = "";
   els.roadmap.style.width = `${width}px`;
   els.roadmap.style.height = `${height}px`;
@@ -2837,15 +2841,31 @@ function addMobileVectorGrid(width, height, monthBoundaries) {
     const path = document.createElementNS(svgNs, "path");
     path.setAttribute("class", className);
     path.setAttribute("d", segments.join(" "));
-    path.setAttribute("vector-effect", "non-scaling-stroke");
     svg.appendChild(path);
   };
-  // Two batched paths replace the many mobile grid DOM nodes. Their stroke stays
-  // in screen space during Safari pinch transforms, so the gesture loop performs
-  // zero grid-width writes while preserving the desktop minor/month hierarchy.
+  // Keep the mobile grid to two batched paths, but leave them as ordinary scaling
+  // SVG strokes during a live pinch. WebKit performs specialized path/bounds work
+  // for non-scaling-stroke under a changing scale ancestor, which is exactly the
+  // large-surface pinch case we need to avoid. Stable zoom states restore the same
+  // screen-space line hierarchy with two settled-only custom properties below.
   addPath("grid-vector-line minor", minorSegments);
   addPath("grid-vector-line month", monthSegments);
   els.roadmap.appendChild(svg);
+  mobileVectorGridEl = svg;
+  syncMobileVectorGridStrokeScale(zoomScale);
+}
+
+function syncMobileVectorGridStrokeScale(scale = zoomScale) {
+  if (!mobileVectorGridEl || !isMobileTouchViewport()) return;
+  const safeScale = Math.max(0.001, Number(scale) || 1);
+  mobileVectorGridEl.style.setProperty(
+    "--mobile-grid-minor-stroke",
+    (MOBILE_GRID_MINOR_SCREEN_PX / safeScale).toFixed(4)
+  );
+  mobileVectorGridEl.style.setProperty(
+    "--mobile-grid-month-stroke",
+    (MOBILE_GRID_MONTH_SCREEN_PX / safeScale).toFixed(4)
+  );
 }
 
 function isMobileTouchViewport() {
@@ -2950,6 +2970,7 @@ function applyZoomGeometry() {
     els.chartStage.style.width = `${width * zoomScale}px`;
     els.chartStage.style.height = `${height * zoomScale}px`;
   }
+  syncMobileVectorGridStrokeScale(zoomScale);
   mobileStageGeometryScale = zoomScale;
   if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
 }
@@ -5313,6 +5334,7 @@ function commitWebKitNativePinchVisual(nextZoom, targetScrollLeft, targetScrollT
   } else {
     els.chartStage.style.transform = "";
     els.roadmap.style.transform = `scale(${zoomScale})`;
+    syncMobileVectorGridStrokeScale(zoomScale);
     if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(zoomScale * 100)}%`;
     mobileStageShrinkPending = zoomScale < mobileStageGeometryScale - 0.0001;
   }

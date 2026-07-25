@@ -4773,21 +4773,21 @@ body {
 }
 .grid-vector-line {
   fill: none;
-  vector-effect: non-scaling-stroke;
+  vector-effect: none;
   shape-rendering: crispEdges;
   stroke-linecap: butt;
   pointer-events: none;
 }
 /* A 1px SVG stroke reads lighter than the filled desktop div on Retina/WebKit.
-   Slightly stronger fixed strokes preserve the same visual hierarchy without any
-   per-pinch style work: minor ~= desktop 1px, month ~= desktop 2px. */
+   Stroke widths are inverse-scaled only at settled zoom states, preserving the
+   minor/month hierarchy without non-scaling-stroke work during live pinch. */
 .grid-vector-line.minor {
   stroke: rgba(255,255,255,.18);
-  stroke-width: 1.3;
+  stroke-width: var(--mobile-grid-minor-stroke, 1.3);
 }
 .grid-vector-line.month {
   stroke: rgba(255,255,255,.31);
-  stroke-width: 2.4;
+  stroke-width: var(--mobile-grid-month-stroke, 2.4);
 }
 
 @media (pointer: coarse) {
