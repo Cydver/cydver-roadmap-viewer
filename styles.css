@@ -4154,7 +4154,10 @@ body {
      positively detected WebKit's native GestureEvent stream. The fallback remains
      the current app-owned Pointer Events path. */
   .chart-scroll.webkit-native-gesture-input {
-    overflow: auto;
+    /* Keep WebKit's native overflow-scrolling surface established even while the
+       fitted roadmap has no scroll range. Live pinch transforms extend scrollable
+       overflow, so overflow:auto otherwise changes state at the exact fit boundary. */
+    overflow: scroll;
     touch-action: pan-x pan-y;
     -webkit-overflow-scrolling: touch;
   }
