@@ -4158,14 +4158,6 @@ body {
     touch-action: pan-x pan-y;
     -webkit-overflow-scrolling: touch;
   }
-  /* Once an inward native pinch makes the roadmap larger than the scrollport,
-     temporarily suspend direct user scrolling so WebKit does not reconcile its
-     accelerated scroll surface beside every scale sample. overflow:hidden keeps
-     the existing programmatic scroll offsets; JS removes this class after commit. */
-  .chart-scroll.webkit-native-gesture-input.touch-overflow-pinch {
-    overflow: hidden;
-    -webkit-overflow-scrolling: auto;
-  }
   .chart-scroll::-webkit-scrollbar,
   .chart-scroll.webkit-native-gesture-input::-webkit-scrollbar {
     display: none;
