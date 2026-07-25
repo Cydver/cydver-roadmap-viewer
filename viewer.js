@@ -5047,8 +5047,17 @@ function touchPairGeometry() {
 }
 function clearTouchStageTransform() {
   if (!els.chartStage) return;
-  if (useMobileTransformCamera()) applyMobileCameraTransform();
-  else els.chartStage.style.transform = "";
+  if (useMobileTransformCamera()) {
+    applyMobileCameraTransform();
+    return;
+  }
+  els.chartStage.style.transform = "";
+  // Native WebKit pinch previews now reuse the roadmap's existing zoom transform
+  // instead of adding a second transformed ancestor on chartStage. Restore the
+  // steady-state roadmap scale whenever that temporary preview is cleared.
+  if (useWebKitNativeGestureInput && els.roadmap) {
+    els.roadmap.style.transform = `scale(${zoomScale})`;
+  }
 }
 function scheduleTouchGestureFrame() {
   if (touchGestureFrame) return;
@@ -5110,14 +5119,19 @@ function applyPinchPreviewFrame(frame, { visual = true } = {}) {
     pinchGesture.viewportWidth,
     pinchGesture.viewportHeight
   );
-  // WebKit's native GestureEvent path must not force the entire roadmap into a
-  // 3D-composited transform. Large transformed layers can hit expensive backing-
-  // store/raster transitions on iOS; keep identical geometry with a 2D transform
-  // and let WebKit choose the rendering path. The Pointer Events fallback retains
-  // its existing translate3d behavior.
-  els.chartStage.style.transform = useWebKitNativeGestureInput
-    ? `translate(${translateX}px, ${translateY}px) scale(${ratio})`
-    : `translate3d(${translateX}px, ${translateY}px, 0) scale(${ratio})`;
+  if (useWebKitNativeGestureInput) {
+    // The steady mobile layout already scales the whole roadmap. Do not add a
+    // second transformed ancestor during native pinch: that creates a nested
+    // transform/raster hierarchy across the entire scrollable map. Applying the
+    // mathematically equivalent absolute transform to the existing roadmap layer
+    // keeps one live transformed surface while chartStage remains pure scroll
+    // geometry. The exact stage extent and scroll position still commit on lift.
+    els.chartStage.style.transform = "";
+    els.roadmap.style.transform = `translate(${translateX}px, ${translateY}px) scale(${nextZoom})`;
+  } else {
+    // The standards-based Pointer Events fallback retains its established preview.
+    els.chartStage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0) scale(${ratio})`;
+  }
   if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(nextZoom * 100)}%`;
 }
 function flushTouchGestureFrame() {
