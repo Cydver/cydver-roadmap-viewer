@@ -36,6 +36,7 @@ const CARD_NAME_MIN_TAG_GAP = 8;
 const MUST_P5_TAG = "Must P5";
 const BUFF_TAG = "Buff";
 const TAG_ORDER = new Map(TAG_OPTIONS.map((tag, i) => [tag.toLowerCase(), i]));
+const ROADMAP_AUTH_STORAGE_KEY = "cydver-roadmap-auth";
 
 const CELL_W = 200;
 const LEFT_W = 260;
@@ -388,7 +389,32 @@ let webKitHeaderLeftLayer = null;
 
 document.addEventListener("DOMContentLoaded", init);
 
+function captureRoadmapAuthFromUrl() {
+  const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+  const authToken = params.get("auth");
+  if (!authToken) return;
+
+  try {
+    localStorage.setItem(ROADMAP_AUTH_STORAGE_KEY, authToken);
+  } catch (error) {
+    console.error("Could not save roadmap authorization session:", error);
+    return;
+  }
+
+  // Remove the signed session token from the visible/shareable URL as soon as it
+  // has been stored locally. Keep all other hash parameters, such as private=.
+  params.delete("auth");
+  const newHash = params.toString();
+  history.replaceState(
+    null,
+    "",
+    `${location.pathname}${location.search}${newHash ? `#${newHash}` : ""}`
+  );
+}
+
 async function init() {
+  captureRoadmapAuthFromUrl();
+
   tooltipEl = els.tooltip;
   loadViewerLocalState();
   bindControls();
