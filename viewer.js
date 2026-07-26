@@ -37,6 +37,7 @@ const MUST_P5_TAG = "Must P5";
 const BUFF_TAG = "Buff";
 const TAG_ORDER = new Map(TAG_OPTIONS.map((tag, i) => [tag.toLowerCase(), i]));
 const ROADMAP_AUTH_STORAGE_KEY = "cydver-roadmap-auth";
+const ROADMAP_AUTH_URL = "https://cydver-roadmap-auth.cydver.workers.dev";
 
 const CELL_W = 200;
 const LEFT_W = 260;
@@ -410,6 +411,29 @@ function captureRoadmapAuthFromUrl() {
     "",
     `${location.pathname}${location.search}${newHash ? `#${newHash}` : ""}`
   );
+}
+
+function getRoadmapAuthToken() {
+  try {
+    return localStorage.getItem(ROADMAP_AUTH_STORAGE_KEY) || "";
+  } catch (error) {
+    console.error("Could not read roadmap authorization session:", error);
+    return "";
+  }
+}
+
+function clearRoadmapAuthToken() {
+  try {
+    localStorage.removeItem(ROADMAP_AUTH_STORAGE_KEY);
+  } catch (error) {
+    console.error("Could not clear roadmap authorization session:", error);
+  }
+}
+
+function startRoadmapDiscordAuth(shareId) {
+  const authUrl = new URL(`${ROADMAP_AUTH_URL}/auth/start`);
+  authUrl.searchParams.set("share", shareId);
+  location.replace(authUrl.toString());
 }
 
 async function init() {
@@ -809,37 +833,152 @@ async function readPrivateHashRoadmap() {
   const params = new URLSearchParams(location.hash.replace(/^#/, ""));
   const shareId = params.get("private");
   if (!shareId) return { present: false, roadmap: null, error: "" };
+
   try {
     if (!validPrivateShareId(shareId)) throw new Error("Private share ID is invalid.");
-    if (!globalThis.crypto?.subtle) throw new Error("Private roadmap decryption requires a secure browser context (HTTPS or localhost).");
-    const keyBytes = base64urlToBytes(params.get("key") || "");
-    if (keyBytes.length !== 32) throw new Error("Private share key is missing or invalid.");
-    const response = await fetch(`data/private/${encodeURIComponent(shareId)}.uce.enc`, { cache: "no-cache" });
+    if (!globalThis.crypto?.subtle) {
+      throw new Error("Private roadmap decryption requires a secure browser context (HTTPS or localhost).");
+    }
+
+    /*
+     * The AES key no longer comes from the share URL. A signed Discord session
+     * stored in this browser is presented to the Cloudflare Worker instead.
+     */
+    const authToken = getRoadmapAuthToken();
+
+    if (!authToken) {
+      startRoadmapDiscordAuth(shareId);
+      return {
+        present: true,
+        roadmap: null,
+        error: "Redirecting to Discord verification…"
+      };
+    }
+
+    let keyResponse;
+    try {
+      keyResponse = await fetch(
+        `${ROADMAP_AUTH_URL}/key/${encodeURIComponent(shareId)}`,
+        {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${authToken}`
+          },
+          cache: "no-store"
+        }
+      );
+    } catch {
+      throw new Error("Could not contact the roadmap authorization service.");
+    }
+
+    /*
+     * A 401 means the locally saved signed session is no longer valid (for
+     * example, SESSION_SECRET was rotated). Clear it and authenticate again.
+     */
+    if (keyResponse.status === 401) {
+      clearRoadmapAuthToken();
+      startRoadmapDiscordAuth(shareId);
+      return {
+        present: true,
+        roadmap: null,
+        error: "Discord verification is required again…"
+      };
+    }
+
+    /*
+     * A 403 is intentionally different: the session is genuine, but that Discord
+     * account is no longer on the allowlist. Do not loop them through OAuth.
+     */
+    if (keyResponse.status === 403) {
+      throw new Error("This Discord account is not authorized to view this roadmap.");
+    }
+
+    if (keyResponse.status === 404) {
+      throw new Error("This roadmap does not have an encryption key configured on the authorization service.");
+    }
+
+    if (!keyResponse.ok) {
+      throw new Error(`Authorization service returned HTTP ${keyResponse.status}.`);
+    }
+
+    const keyPayload = await keyResponse.json();
+    const keyBytes = base64urlToBytes(keyPayload?.key || "");
+    if (keyBytes.length !== 32) {
+      throw new Error("The authorization service returned an invalid private roadmap key.");
+    }
+
+    const response = await fetch(
+      `data/private/${encodeURIComponent(shareId)}.uce.enc`,
+      { cache: "no-cache" }
+    );
+
     if (!response.ok) {
-      if (response.status === 404) throw new Error(`Encrypted roadmap ${shareId}.uce.enc was not found in data/private/.`);
+      if (response.status === 404) {
+        throw new Error(`Encrypted roadmap ${shareId}.uce.enc was not found in data/private/.`);
+      }
       throw new Error(`Could not load encrypted roadmap (HTTP ${response.status}).`);
     }
+
     const envelope = JSON.parse(await response.text());
-    if (envelope?.format !== "gundam-uce-roadmap-private" || Number(envelope?.version) !== 1) throw new Error("Encrypted roadmap format is not supported.");
-    if (envelope.shareId !== shareId) throw new Error("Encrypted roadmap share ID does not match this link.");
-    if (envelope.cipher !== "AES-GCM-256") throw new Error("Encrypted roadmap cipher is not supported.");
+    if (
+      envelope?.format !== "gundam-uce-roadmap-private" ||
+      Number(envelope?.version) !== 1
+    ) {
+      throw new Error("Encrypted roadmap format is not supported.");
+    }
+    if (envelope.shareId !== shareId) {
+      throw new Error("Encrypted roadmap share ID does not match this link.");
+    }
+    if (envelope.cipher !== "AES-GCM-256") {
+      throw new Error("Encrypted roadmap cipher is not supported.");
+    }
+
     const iv = base64urlToBytes(envelope.iv);
     if (iv.length !== 12) throw new Error("Encrypted roadmap IV is invalid.");
+
     const ciphertext = base64urlToBytes(envelope.data);
-    const key = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["decrypt"]);
-    const additionalData = new TextEncoder().encode(`gundam-uce-roadmap-private:v1:${shareId}`);
-    const decrypted = new Uint8Array(await crypto.subtle.decrypt({
-      name: "AES-GCM",
-      iv,
-      additionalData,
-      tagLength: 128
-    }, key, ciphertext));
-    const plainBytes = await decompressPrivateRoadmap(decrypted, envelope.compression || "none");
+    const key = await crypto.subtle.importKey(
+      "raw",
+      keyBytes,
+      { name: "AES-GCM" },
+      false,
+      ["decrypt"]
+    );
+
+    const additionalData = new TextEncoder().encode(
+      `gundam-uce-roadmap-private:v1:${shareId}`
+    );
+
+    const decrypted = new Uint8Array(
+      await crypto.subtle.decrypt(
+        {
+          name: "AES-GCM",
+          iv,
+          additionalData,
+          tagLength: 128
+        },
+        key,
+        ciphertext
+      )
+    );
+
+    const plainBytes = await decompressPrivateRoadmap(
+      decrypted,
+      envelope.compression || "none"
+    );
+
     const json = JSON.parse(new TextDecoder().decode(plainBytes));
-    const roadmap = Array.isArray(json) ? { ...structuredClone(DEFAULT_STATE), units: json } : { ...structuredClone(DEFAULT_STATE), ...json };
+    const roadmap = Array.isArray(json)
+      ? { ...structuredClone(DEFAULT_STATE), units: json }
+      : { ...structuredClone(DEFAULT_STATE), ...json };
+
     return { present: true, roadmap, error: "" };
   } catch (error) {
-    return { present: true, roadmap: null, error: `Could not open private roadmap: ${error.message}` };
+    return {
+      present: true,
+      roadmap: null,
+      error: `Could not open private roadmap: ${error.message}`
+    };
   }
 }
 
