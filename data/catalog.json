@@ -1,11 +1,22 @@
 {
-  "generatedAt": "2026-07-22T06:12:35.972Z",
+  "generatedAt": "2026-07-29T06:11:43.396Z",
   "sources": [
     "https://altema.jp/gundamuce/msrea/4",
     "https://altema.jp/gundamuce/chararea/4"
   ],
   "note": "Generated from Altema list pages. If icons are remote URLs instead of icons/altema files, the image download step was blocked but the app can still display them.",
   "items": [
+    {
+      "id": "altema-ms-8c13a7c0e3",
+      "kind": "ms",
+      "name": "ガンダム(最終決戦仕様)",
+      "icon": "icons/altema/ms-ガンダム-最終決戦仕様-f971f63f.jpg",
+      "remoteIcon": "https://img.altema.jp/gundamuce/mobile_suit/icon/419.jpg",
+      "sourceUrl": "https://altema.jp/gundamuce/ms/419",
+      "attribute": "紫",
+      "role": "汎用",
+      "rating": "9.5"
+    },
     {
       "id": "altema-ms-1380bf1660",
       "kind": "ms",
@@ -2777,6 +2788,17 @@
       "attribute": "黄",
       "role": "汎用",
       "rating": "7.5"
+    },
+    {
+      "id": "altema-pilot-17702fa728",
+      "kind": "pilot",
+      "name": "アムロ・レイ(C0463)",
+      "icon": "icons/altema/pilot-アムロ・レイ-c0463-e7290fe7.jpg",
+      "remoteIcon": "https://img.altema.jp/gundamuce/chara/icon/373.jpg",
+      "sourceUrl": "https://altema.jp/gundamuce/chara/373",
+      "attribute": "",
+      "role": "",
+      "rating": "9.5"
     },
     {
       "id": "altema-pilot-ed2e9b835f",
