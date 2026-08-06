@@ -96,6 +96,7 @@ const activeMetaStatusFilters = new Set();
 const activeMetaUnitFilters = new Set();
 let customUnitFilterEditing = false;
 let customUnitFilterDraft = new Set();
+let metaBarsVisible = true;
 let metaOwnerHoverId = null;
 let metaOwnerFocusId = null;
 let metaOwnerTouchSelectionId = null;
@@ -359,6 +360,7 @@ const els = {
   chartScroll: document.getElementById("chartScroll"),
   legend: document.getElementById("statusLegend"),
   legendPanel: document.querySelector(".legend-panel"),
+  metaBarsToggleButton: document.getElementById("btnToggleMetaBars"),
   customUnitFilterButton: document.getElementById("btnCustomUnitFilter"),
   customUnitFilterStatus: document.getElementById("customUnitFilterStatus"),
   customUnitFilterSaveButton: document.getElementById("btnSaveCustomUnitFilter"),
@@ -498,6 +500,7 @@ function bindControls() {
   bindDirectTouchActionButton(document.getElementById("btnOpenPullCalculator"), openPullCalculator);
   bindDirectTouchActionButton(document.getElementById("btnClosePullCalculator"), closePullCalculator);
   document.getElementById("btnResetPullCalculator")?.addEventListener("click", resetPullCalculator);
+  els.metaBarsToggleButton?.addEventListener("click", toggleMetaBarsVisibility);
   els.customUnitFilterButton?.addEventListener("click", enterCustomUnitFilterMode);
   els.customUnitFilterSaveButton?.addEventListener("click", saveCustomUnitFilter);
   els.customUnitFilterClearButton?.addEventListener("click", clearCustomUnitFilterDraft);
@@ -1136,6 +1139,7 @@ function renderAll() {
   renderChart();
   applyZoom();
   if (!els.pullCalculator?.classList.contains("hidden")) renderPullCalculator();
+  updateMetaBarsVisibility();
   updateCustomUnitFilterControls();
 }
 
@@ -1612,6 +1616,7 @@ function loadViewerLocalState() {
   }
 
   pullCalculator = normalizeStoredPullCalculator(pullSource);
+  metaBarsVisible = stored?.metaBarsVisible !== false;
   viewerLocalStateCache = {
     version: 1,
     filtersByRoadmap: stored?.filtersByRoadmap && typeof stored.filtersByRoadmap === "object"
@@ -1677,11 +1682,32 @@ function saveViewerLocalState() {
     const payload = {
       version: 1,
       pullCalculator: { ...pullCalculator },
+      metaBarsVisible,
       filtersByRoadmap: retainedFilters
     };
     localStorage.setItem(VIEWER_LOCAL_STATE_KEY, JSON.stringify(payload));
     viewerLocalStateCache = payload;
   } catch {}
+}
+
+function toggleMetaBarsVisibility() {
+  metaBarsVisible = !metaBarsVisible;
+  hideTooltip(true);
+  updateMetaBarsVisibility();
+  updateMetaOwnerHighlight();
+  saveViewerLocalState();
+}
+
+function updateMetaBarsVisibility() {
+  els.roadmap?.classList.toggle("meta-bars-hidden", !metaBarsVisible);
+  if (!els.metaBarsToggleButton) return;
+
+  const nextMode = metaBarsVisible ? "simplified" : "full";
+  els.metaBarsToggleButton.textContent = metaBarsVisible ? "Full View" : "Simple View";
+  els.metaBarsToggleButton.classList.toggle("active", metaBarsVisible);
+  els.metaBarsToggleButton.setAttribute("aria-pressed", metaBarsVisible ? "true" : "false");
+  els.metaBarsToggleButton.setAttribute("aria-label", `Switch to ${nextMode} view`);
+  els.metaBarsToggleButton.title = `Switch to ${nextMode} view`;
 }
 
 function savePullCalculator() {
@@ -4425,7 +4451,9 @@ function setMetaOwnerHighlightState(unitId, highlighted) {
 }
 function updateMetaOwnerHighlight() {
   if (!els.roadmap) return;
-  const activeId = metaOwnerProfileId || metaOwnerHoverId || metaOwnerFocusId || metaOwnerTouchSelectionId || null;
+  const activeId = metaBarsVisible
+    ? (metaOwnerProfileId || metaOwnerHoverId || metaOwnerFocusId || metaOwnerTouchSelectionId || null)
+    : null;
   if (activeId === metaOwnerHighlightedId) return;
   if (activeId) syncMobileMetaFocusDimmer(zoomScale, null, null, 0, 0, true);
   if (metaOwnerHighlightedId) setMetaOwnerHighlightState(metaOwnerHighlightedId, false);

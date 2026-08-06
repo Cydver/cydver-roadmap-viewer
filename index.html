@@ -19,12 +19,12 @@
         <button id="btnOpenPullCalculator" class="viewer-utility-action viewer-utility-calc" type="button" aria-controls="pullCalculator" aria-expanded="false">Pull Calc</button>
       </div>
     </header>
-
     <section class="legend-panel" aria-label="Meta status legend">
       <div class="legend-wrap">
         <div class="legend-title">Meta status <span>PVP only</span></div>
         <div id="statusLegend" class="legend"></div>
         <div class="legend-filter-controls" aria-label="Custom unit highlight filter">
+          <button id="btnToggleMetaBars" class="viewer-utility-action viewer-utility-view active" type="button" aria-controls="roadmap" aria-pressed="true" aria-label="Switch to simplified view">Full View</button>
           <button id="btnCustomUnitFilter" class="viewer-utility-action viewer-utility-filter" type="button" aria-pressed="false" aria-expanded="false">Filter Units</button>
           <span id="customUnitFilterStatus" class="legend-filter-status hidden" aria-live="polite"></span>
           <button id="btnSaveCustomUnitFilter" class="hidden viewer-filter-action primary-action" type="button">Save</button>
@@ -34,7 +34,6 @@
       </div>
       <div id="customUnitFilterHint" class="legend-filter-hint hidden">Selection mode · click an MS, paired pilot, or meta bar to toggle that MS timeline.</div>
     </section>
-
     <section id="message" class="message hidden"></section>
 
     <section id="chartScroll" class="chart-scroll" aria-label="Roadmap chart">
@@ -43,7 +42,6 @@
       </div>
     </section>
   </main>
-
   <aside id="pullCalculator" class="diamond-planner-drawer pull-calculator-drawer hidden" aria-label="Pull probability calculator">
     <div class="diamond-planner-head">
       <div>
@@ -52,13 +50,11 @@
       </div>
       <button id="btnClosePullCalculator" class="drawer-close" type="button" aria-label="Close pull calculator">×</button>
     </div>
-
     <div class="pull-calc-inputs">
       <label class="diamond-balance-field" for="pullCalcDiamonds">
         <span>Diamonds</span>
         <input id="pullCalcDiamonds" type="number" min="0" step="300" inputmode="numeric" value="0" />
       </label>
-
       <section class="pull-calc-banner-field" aria-label="MS banner settings">
         <label class="pull-calc-target-field" for="pullCalcMsTarget">
           <span>MS target</span>
@@ -81,7 +77,6 @@
           <span>Use pity on pickup</span>
         </label>
       </section>
-
       <section class="pull-calc-banner-field" aria-label="Pilot banner settings">
         <label class="pull-calc-target-field" for="pullCalcPilotTarget">
           <span>Pilot target</span>
@@ -105,9 +100,7 @@
         </label>
       </section>
     </div>
-
     <div id="pullCalcResult" class="pull-calc-result" aria-live="polite"></div>
-
     <section class="pull-calc-breakdown" aria-labelledby="pullCalcBreakdownTitle">
       <div class="pull-calc-breakdown-head">
         <div>
@@ -120,7 +113,6 @@
       </div>
       <div id="pullCalcProbabilityList" class="pull-calc-probability-list"></div>
     </section>
-
     <button id="btnResetPullCalculator" class="diamond-clear" type="button">Reset calculator</button>
   </aside>
 

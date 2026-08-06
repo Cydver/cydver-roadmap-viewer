@@ -2947,6 +2947,15 @@ body {
   user-drag: none;
 }
 
+.roadmap.meta-bars-hidden .lane-track,
+.roadmap.meta-bars-hidden .meta-owner-tether,
+.roadmap.meta-bars-hidden .meta-owner-node,
+.roadmap.meta-bars-hidden .meta-bar,
+.roadmap.meta-bars-hidden .meta-link,
+.roadmap.meta-bars-hidden .meta-focus-dimmer {
+  display: none;
+}
+
 /* Custom unit-filter edit mode: selection is explicit, then Save returns normal interaction. */
 .roadmap.custom-unit-filter-editing .unit-card.custom-filter-eligible,
 .roadmap.custom-unit-filter-editing .meta-bar {
@@ -3022,6 +3031,16 @@ body {
   opacity: .82;
   pointer-events: none;
 }
+.viewer-utility-view::before {
+  width: 12px;
+  height: 10px;
+  transform: translateY(-50%);
+  background:
+    linear-gradient(currentColor 0 0) 0 0 / 100% 2px no-repeat,
+    linear-gradient(currentColor 0 0) 0 4px / 75% 2px no-repeat,
+    linear-gradient(currentColor 0 0) 0 8px / 45% 2px no-repeat;
+}
+.viewer-utility-view:not(.active)::before { opacity: .45; }
 .viewer-utility-filter::before {
   width: 11px;
   height: 10px;
