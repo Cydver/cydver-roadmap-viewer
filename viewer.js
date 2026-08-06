@@ -1284,31 +1284,35 @@ function renderChart() {
   getTiers().forEach(tier => addDiv("grid-line h", { top: `${tierY(tier.id)}px` }));
   addDiv("grid-line h", { top: `${height}px` });
 
-  getTiers().forEach(tier => {
-    for (let lane = 1; lane <= visibleLaneCount(tier.id); lane++) {
-      const track = addDiv("lane-track", {
-        top: `${laneY(tier.id, lane)}px`,
-        width: `${Math.max(4, width - LEFT_W - 20)}px`
-      });
-      const owner = layoutGeometryCache.laneOwners.get(`${tier.id}|${lane}`);
-      if (owner) track.dataset.unitId = owner.id;
-      track.setAttribute("aria-hidden", "true");
-    }
-  });
-
-  metaFocusDimmerEl = addDiv("meta-focus-dimmer");
-  metaFocusDimmerEl.setAttribute("aria-hidden", "true");
-  resetMobileMetaFocusDimmerSurface();
-
-  state.units
-    .filter(hasVisibleMetaSegments)
-    .sort((a, b) => laneY(a) - laneY(b) || normalizeWeek(a.week) - normalizeWeek(b.week) || a.name.localeCompare(b.name))
-    .forEach(unit => {
-      renderMetaOwnerTether(unit);
-      renderMetaSegmentLinks(unit);
-      const segments = sortedVisibleSegments(unit);
-      segments.forEach((segment, index) => renderSegment(unit, segment, index, segments.length));
+  if (metaBarsVisible) {
+    getTiers().forEach(tier => {
+      for (let lane = 1; lane <= visibleLaneCount(tier.id); lane++) {
+        const track = addDiv("lane-track", {
+          top: `${laneY(tier.id, lane)}px`,
+          width: `${Math.max(4, width - LEFT_W - 20)}px`
+        });
+        const owner = layoutGeometryCache.laneOwners.get(`${tier.id}|${lane}`);
+        if (owner) track.dataset.unitId = owner.id;
+        track.setAttribute("aria-hidden", "true");
+      }
     });
+
+    metaFocusDimmerEl = addDiv("meta-focus-dimmer");
+    metaFocusDimmerEl.setAttribute("aria-hidden", "true");
+    resetMobileMetaFocusDimmerSurface();
+
+    state.units
+      .filter(hasVisibleMetaSegments)
+      .sort((a, b) => laneY(a) - laneY(b) || normalizeWeek(a.week) - normalizeWeek(b.week) || a.name.localeCompare(b.name))
+      .forEach(unit => {
+        renderMetaOwnerTether(unit);
+        renderMetaSegmentLinks(unit);
+        const segments = sortedVisibleSegments(unit);
+        segments.forEach((segment, index) => renderSegment(unit, segment, index, segments.length));
+      });
+  } else {
+    metaFocusDimmerEl = null;
+  }
 
   state.units
     .slice()
@@ -1690,10 +1694,56 @@ function saveViewerLocalState() {
   } catch {}
 }
 
+function captureMetaLayoutViewportAnchor() {
+  if (!els.chartScroll) return null;
+  const localY = Math.max(0, els.chartScroll.clientHeight / 2);
+  const contentY = (els.chartScroll.scrollTop + localY) / Math.max(0.001, zoomScale);
+  if (contentY <= HEADER_H) return { type: "header", contentY, localY };
+
+  for (const tier of getTiers()) {
+    const top = tierY(tier.id);
+    const height = tierHeight(tier.id);
+    if (contentY <= top + height) {
+      return {
+        type: "tier",
+        tierId: tier.id,
+        progress: clamp((contentY - top) / Math.max(1, height), 0, 1),
+        localY
+      };
+    }
+  }
+  return { type: "bottom", localY };
+}
+
+function restoreMetaLayoutViewportAnchor(anchor) {
+  if (!anchor || !els.chartScroll) return;
+  let contentY = 0;
+  if (anchor.type === "tier") {
+    contentY = tierY(anchor.tierId) + tierHeight(anchor.tierId) * clamp(anchor.progress, 0, 1);
+  } else if (anchor.type === "bottom") {
+    contentY = baseChartHeight();
+  } else {
+    contentY = Math.min(Number(anchor.contentY) || 0, HEADER_H);
+  }
+  const maxScrollTop = Math.max(0, baseChartHeight() * zoomScale - els.chartScroll.clientHeight);
+  els.chartScroll.scrollTop = clamp(contentY * zoomScale - (Number(anchor.localY) || 0), 0, maxScrollTop);
+}
+
 function toggleMetaBarsVisibility() {
+  const viewportAnchor = captureMetaLayoutViewportAnchor();
+  cancelDesktopWheelZoomAnimation();
+  cancelInitialFitToWidth();
   metaBarsVisible = !metaBarsVisible;
   hideTooltip(true);
   updateMetaBarsVisibility();
+
+  // Meta lanes contribute to tier height in full view. Rebuild the cached chart
+  // geometry so simplified view removes that lane-only space while cards remain
+  // positioned inside the same tier rows and on the same between-tier boundaries.
+  invalidateLayoutGeometryCache();
+  renderChart();
+  applyZoom();
+  restoreMetaLayoutViewportAnchor(viewportAnchor);
   updateMetaOwnerHighlight();
   saveViewerLocalState();
 }
@@ -4539,9 +4589,18 @@ function betweenBoundaryMetaSafeHeight(tierId) {
 }
 function tierHeight(tierId) {
   if (layoutGeometryCache.tierHeights.has(tierId)) return layoutGeometryCache.tierHeights.get(tierId);
-  const lanes = visibleLaneCount(tierId);
   const iconContentHeight = ICON_TOP + maxIconStackVisualHeight(tierId) + 28;
   const minHeight = Math.max(BLANK_TIER_H, iconContentHeight);
+
+  // Simplified view is card-driven: keep enough room for every visual stack, but
+  // do not reserve the lane area used exclusively by hidden meta bars. Full view
+  // retains the original lane and between-boundary collision calculations.
+  if (!metaBarsVisible) {
+    layoutGeometryCache.tierHeights.set(tierId, minHeight);
+    return minHeight;
+  }
+
+  const lanes = visibleLaneCount(tierId);
   const betweenSafeHeight = betweenBoundaryMetaSafeHeight(tierId);
   const value = !lanes
     ? Math.max(minHeight, betweenSafeHeight)
