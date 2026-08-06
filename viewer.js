@@ -500,7 +500,7 @@ function bindControls() {
   bindDirectTouchActionButton(document.getElementById("btnOpenPullCalculator"), openPullCalculator);
   bindDirectTouchActionButton(document.getElementById("btnClosePullCalculator"), closePullCalculator);
   document.getElementById("btnResetPullCalculator")?.addEventListener("click", resetPullCalculator);
-  els.metaBarsToggleButton?.addEventListener("click", toggleMetaBarsVisibility);
+  bindDirectTouchActionButton(els.metaBarsToggleButton, toggleMetaBarsVisibility);
   els.customUnitFilterButton?.addEventListener("click", enterCustomUnitFilterMode);
   els.customUnitFilterSaveButton?.addEventListener("click", saveCustomUnitFilter);
   els.customUnitFilterClearButton?.addEventListener("click", clearCustomUnitFilterDraft);
@@ -5433,6 +5433,7 @@ function toggleCustomUnitFilterDraft(unit) {
 }
 function updateCustomUnitFilterControls() {
   const count = customUnitFilterEditing ? customUnitFilterDraft.size : activeMetaUnitFilters.size;
+  els.metaBarsToggleButton?.classList.toggle("hidden", customUnitFilterEditing);
   if (els.customUnitFilterButton) {
     els.customUnitFilterButton.textContent = `Filter Units${!customUnitFilterEditing && count ? ` (${count})` : ""}`;
     els.customUnitFilterButton.classList.toggle("active", !customUnitFilterEditing && count > 0);
