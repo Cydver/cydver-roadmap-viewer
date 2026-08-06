@@ -197,16 +197,35 @@ function createLayoutGeometryCache() {
 }
 let layoutGeometryCache = createLayoutGeometryCache();
 let roadmapImageReuseCache = new Map();
+let roadmapCardDetailReuseCache = new Map();
 function invalidateLayoutGeometryCache() {
   layoutGeometryCache = createLayoutGeometryCache();
 }
-function captureRoadmapImagesForRender() {
-  const next = new Map();
-  els.roadmap?.querySelectorAll(".unit-card[data-id] > img").forEach(img => {
-    const unitId = img.parentElement?.dataset?.id;
-    if (unitId) next.set(unitId, img);
+function captureRoadmapRenderState() {
+  const images = new Map();
+  const cardDetails = new Map();
+  els.roadmap?.querySelectorAll(".unit-card[data-id]").forEach(card => {
+    const unitId = card.dataset.id;
+    if (!unitId) return;
+    const img = card.querySelector("img");
+    if (img) images.set(unitId, img);
+    cardDetails.set(unitId, {
+      iconOnly: card.classList.contains("icon-only"),
+      tagsOnly: card.classList.contains("tags-only")
+    });
   });
-  roadmapImageReuseCache = next;
+  roadmapImageReuseCache = images;
+  roadmapCardDetailReuseCache = cardDetails;
+}
+function initialRoadmapCardDetail(unit, size = ICON_W) {
+  const reused = roadmapCardDetailReuseCache.get(unit?.id);
+  roadmapCardDetailReuseCache.delete(unit?.id);
+  if (reused) return reused;
+  if (isMobileTouchViewport()) return mobileUnitCardDetailState(unit, zoomScale);
+  return {
+    iconOnly: Math.max(0, Number(size) || ICON_W) * zoomScale < CARD_DETAILS_MIN_VISUAL_SIZE,
+    tagsOnly: false
+  };
 }
 function reusableRoadmapImage(unit) {
   if (!unit?.icon) return null;
@@ -1218,7 +1237,7 @@ function setRoadmapHeaderText(element, text) {
 
 function renderChart() {
   mobileCardNameMetricsById.clear();
-  captureRoadmapImagesForRender();
+  captureRoadmapRenderState();
   const width = baseChartWidth();
   const height = baseChartHeight();
   els.roadmap.innerHTML = "";
@@ -1320,6 +1339,7 @@ function renderChart() {
     .forEach(renderUnit);
   rebuildMetaOwnerElementIndex();
   roadmapImageReuseCache.clear();
+  roadmapCardDetailReuseCache.clear();
   // Filtering is semantic state, not zoom presentation. Apply it when markup is
   // rebuilt instead of rescanning the whole roadmap at every zoom commit.
   applyMetaFilters();
@@ -1329,8 +1349,9 @@ function renderChart() {
 function renderUnit(unit) {
   const slot = sameSlotOffset(unit);
   const size = slot.size || ICON_W;
+  const initialDetail = initialRoadmapCardDetail(unit, size);
   const card = document.createElement("article");
-  card.className = `unit-card${activeUnitId === unit.id ? " active" : ""}${hasMustP5(unit) ? " must-p5" : ""}${hasBuff(unit) ? " buff" : ""}${normalizeRowOffset(unit.rowOffset) ? " between-row" : ""}`;
+  card.className = `unit-card${activeUnitId === unit.id ? " active" : ""}${hasMustP5(unit) ? " must-p5" : ""}${hasBuff(unit) ? " buff" : ""}${normalizeRowOffset(unit.rowOffset) ? " between-row" : ""}${initialDetail.iconOnly ? " icon-only" : ""}${initialDetail.tagsOnly ? " tags-only" : ""}`;
   card.dataset.id = unit.id;
   const metaOwner = metaOwnerForUnit(unit);
   if (metaOwner?.id && hasVisibleMetaSegments(metaOwner)) card.dataset.metaOwnerId = metaOwner.id;
@@ -1339,6 +1360,7 @@ function renderUnit(unit) {
   card.style.width = `${size}px`;
   card.style.height = `${size}px`;
   card.style.zIndex = String(unitZIndex(unit, slot));
+  if (isMobileTouchViewport()) card.style.setProperty("--textBoost", legibleTextScale(zoomScale).toFixed(3));
   card.setAttribute("tabindex", "0");
   card.setAttribute("aria-label", unit.name);
 
